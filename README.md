@@ -297,6 +297,17 @@ The language screen's own words are built into the firmware (`firmware/include/l
   1. `python eval\fetch_kcc.py <KCC resource id>`
   2. `python eval\run_eval.py --queries eval\queries_kcc.json --fresh`
 
+## Any farming question (general AI)
+
+When the knowledge base cannot answer a farming question, or Gemma fails, a Gemini model answers it from its general agricultural knowledge. It uses the same `GEMINI_API_KEY`; the model is set by `GENERAL_MODEL` (default `gemini-3-flash-preview`) and `GENERAL_FALLBACK_MODEL` (`gemini-flash-lite-latest`), each try limited to `GENERAL_TIMEOUT` seconds (15).
+- **What it covers:** crops, livestock, dairy, poultry, fisheries, beekeeping, machinery, irrigation, schemes, marketing and more (`via: "general"`, source `general_knowledge`).
+- **Off-topic questions** get "I can only help with farming and agriculture questions."
+- **Safety rules:**
+  - Answers with any amount and unit (kg, ml, litre...) are dropped, because only the documents and the fertilizer screen give verified doses.
+  - It never guesses prices, weather or sensor readings.
+  - Fertilizer answers get the safety warning.
+- Verified documents are always tried first. `GENERAL_AI=0` turns this off.
+
 ## Market prices (today's crop rates)
 
 **Source:** AGMARKNET daily mandi prices, through the data.gov.in API ("Current Daily Price of Various Commodities from Various Markets"). Put a free data.gov.in key in `.env` as `DATA_GOV_IN_API_KEY`.

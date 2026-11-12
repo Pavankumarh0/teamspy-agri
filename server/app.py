@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 import hmac
 import fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
 from grounding import grounded_sources
-from prompts import PROMPT
+from prompts import GENERAL_PROMPT, PROMPT
 from rag import Retriever
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -186,6 +186,46 @@ def extractive_answer(question: str, hits: list[dict]) -> tuple[str, str] | None
     return "Here is what I found. " + text, picked[0][3]
 
 
+GENERAL_SOURCE = "general_knowledge"
+NOT_FARMING = "I can only help with farming and agriculture questions. Please ask me about your crops, soil, animals or farm."
+# Any amount with a unit in a general-knowledge answer is unverified, so the
+# answer is dropped (the documents and the fertilizer screen give the verified doses).
+QUANTITY = re.compile(r"\d+(?:\.\d+)?\s*(?:kg|kgs|g|gm|gms|grams?|mg|ml|l|lit|litres?|liters?|tonnes?|tons?|t|"
+                      r"quintals?|q|cc|ppm)\b", re.I)
+
+
+def general_on() -> bool:
+    return os.getenv("GENERAL_AI", "1") == "1" and bool(os.getenv("GEMINI_API_KEY", "").strip())
+
+
+async def general_answer(q: str, rq: str, sid: str, sensor=None) -> dict | None:
+    """The documents could not answer: a Gemini model answers the farming
+    question from its general knowledge (rules in prompts.GENERAL_PROMPT).
+    None = no usable answer, so the caller gives its usual reply."""
+    if not general_on():
+        return None
+    prev = f"PREVIOUS QUESTION (for context only): {LAST_Q[sid]}\n" if rq != q and sid in LAST_Q else ""
+    try:
+        raw = await llm.generate_general(GENERAL_PROMPT.format(previous=prev, question=q))
+    except Exception as e:
+        log.error("general model error: %s", e)
+        return None
+    if "NOT_AGRI" in raw.upper():
+        log.info("general model: not an agriculture question")
+        return pack(q, NOT_FARMING, False, via="not-farming", sensor=sensor)
+    answer = clean(llm.split_sources(raw)[0])
+    if not answer:
+        return None
+    if QUANTITY.search(answer):
+        log.info("rejected general answer with a quantity: %r", answer[:200])
+        return None
+    if FERT_WORDS.search(q) or FERT_WORDS.search(answer):
+        answer = f"{answer} {fertilizer.SAFETY_WARNING}"
+    LAST_Q[sid] = q
+    log.info("answered from general knowledge (%s)", os.getenv("GENERAL_MODEL", "gemini-3-flash-preview"))
+    return pack(q, answer, True, [GENERAL_SOURCE], via="general", sensor=sensor)
+
+
 async def answer_question(q: str, sid: str = "web") -> dict:
     q = (q or "").strip()
     if not q:
@@ -231,10 +271,10 @@ async def answer_question(q: str, sid: str = "web") -> dict:
             text = sensors.as_context(rec) + ("\n" + sensor_hit["text"] if sensor_hit else "")
             sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm sensor readings", "text": text}
             relevant = True
-        elif sensor_hit is None and (not relevant or sensors.LIVE_INTENT.search(q)):
+        elif sensor_hit is None and ((not relevant and not general_on()) or sensors.LIVE_INTENT.search(q)):
             return pack(q, NO_SENSOR_DATA, False, via="no-sensor-data")
     if not relevant:
-        return pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
+        return await general_answer(q, rq, sid, sensor) or pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     ctx = "\n\n".join(f"[{h['source']}] {h['title']}\n{h['text']}" for h in hits)
     live = sensor_hit["text"] if sensor_hit else "No live sensor reading is available for this question."
@@ -243,13 +283,19 @@ async def answer_question(q: str, sid: str = "web") -> dict:
         raw = await llm.generate(PROMPT.format(sensors=live, context=ctx, question=q))
     except Exception as e:
         log.error("LLM error: %s", e)
+        # Gemma unavailable: the general model answers if it can (live sensor /
+        # price questions excepted: it cannot see that data), else verbatim KB lines.
+        if not sensor_hit:
+            g = await general_answer(q, rq, sid, sensor)
+            if g:
+                return g
         found = extractive_answer(q, hits)
         if found:
             log.info("answered from the knowledge base directly (Gemma unavailable)")
             return pack(q, found[0], True, [found[1]], via="kb-direct", sensor=sensor)
         return pack(q, BROKEN, False, via="error", sensor=sensor)
     if "NOT_IN_KB" in raw.upper():
-        return pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
+        return await general_answer(q, rq, sid, sensor) or pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     answer, cited = llm.split_sources(raw)
     if sensor_hit and SENSOR_SOURCE in raw.rsplit("\n", 1)[-1]:
@@ -259,7 +305,7 @@ async def answer_question(q: str, sid: str = "web") -> dict:
         # Catches invented quantities and readings: any number that is not in
         # the documents or the sensor section fails.
         log.info("rejected ungrounded answer: %r", answer[:200])
-        return pack(q, DONT_KNOW, False, via="ungrounded", sensor=sensor)
+        return await general_answer(q, rq, sid, sensor) or pack(q, DONT_KNOW, False, via="ungrounded", sensor=sensor)
     sources = [s for s in cited if s in sources] or sources
     LAST_Q[sid] = q
     log.info("answered from %s", ", ".join(sources))

@@ -120,6 +120,24 @@ async def _generate_gemini(prompt: str) -> str:
     raise RuntimeError("all Gemma attempts failed: " + "; ".join(errors))
 
 
+async def generate_general(prompt: str) -> str:
+    """A Gemini model answering from its own knowledge (GENERAL_MODEL, then
+    GENERAL_FALLBACK_MODEL), for farming questions the documents don't cover."""
+    plan = [os.getenv("GENERAL_MODEL", "gemini-3-flash-preview").strip(),
+            os.getenv("GENERAL_FALLBACK_MODEL", "gemini-flash-lite-latest").strip()]
+    plan = [m for i, m in enumerate(plan) if m and m not in plan[:i]]
+    thinking = os.getenv("GENERAL_THINKING", "minimal").strip()
+    errors = []
+    async with httpx.AsyncClient(timeout=float(os.getenv("GENERAL_TIMEOUT", "15"))) as c:
+        for attempt, model in enumerate(plan):
+            try:
+                return await _gemini_once(c, model, prompt, thinking)
+            except (_Retryable, httpx.HTTPStatusError) as e:
+                errors.append(str(e)[:200])
+                log.warning("general model attempt %d (%s) failed: %s", attempt + 1, model, str(e)[:200])
+    raise RuntimeError("all general model attempts failed: " + "; ".join(errors))
+
+
 async def generate(prompt: str) -> str:
     if os.getenv("LLM_BACKEND", "ollama").lower() == "gemini":
         return await _generate_gemini(prompt)
