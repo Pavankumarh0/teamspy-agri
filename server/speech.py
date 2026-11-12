@@ -207,7 +207,8 @@ def save_wav(path, pcm: bytes, rate: int):
 async def synth_mp3(text: str, voice: str) -> bytes:
     import edge_tts
     buf = bytearray()
-    async for ch in edge_tts.Communicate(text, voice).stream():
+    # TTS_RATE: a little slower than normal is easier to follow on a small speaker.
+    async for ch in edge_tts.Communicate(text, voice, rate=os.getenv("TTS_RATE", "+0%")).stream():
         if ch["type"] == "audio":
             buf += ch["data"]
     if not buf:

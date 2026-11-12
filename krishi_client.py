@@ -646,6 +646,14 @@ class Esp32Link:
             pass
 
 
+def kiosk_volume(arg):
+    """--volume, else KIOSK_VOLUME in .env (0-100), else the firmware's own level."""
+    if arg is not None:
+        return arg
+    v = os.getenv("KIOSK_VOLUME", "").strip()
+    return int(v) if v.isdigit() else None
+
+
 def connect_esp32(port, volume=None):
     """Open the ESP32 link, or return None (the client keeps working without it)."""
     if port and port.lower() == "none":
@@ -1303,7 +1311,7 @@ def main(argv=None):
     if args.ask:
         if check_server(args.server) is None:
             return 1
-        esp = connect_esp32(args.esp32, args.volume)
+        esp = connect_esp32(args.esp32, kiosk_volume(args.volume))
         try:
             handle_question(args.server, args.ask, args.session, esp,
                             not args.no_audio, args.pc_audio)
@@ -1319,7 +1327,7 @@ def main(argv=None):
     if not args.pc_mic and not args.devices:
         if check_server(args.server) is None:
             return 1
-        esp = connect_esp32(args.esp32, args.volume)
+        esp = connect_esp32(args.esp32, kiosk_volume(args.volume))
         if esp:
             try:
                 run_button_mode(args.server, esp, args)
@@ -1369,7 +1377,7 @@ def main(argv=None):
         else:
             device = pick_input_device(pa, devices, default_index)
 
-        esp = connect_esp32(args.esp32, args.volume)
+        esp = connect_esp32(args.esp32, kiosk_volume(args.volume))
 
         try:
             hotkey = HotkeyListener(args.hotkey).start()

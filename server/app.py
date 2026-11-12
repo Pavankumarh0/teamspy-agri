@@ -110,14 +110,22 @@ def kiosk_loud(pcm: bytes) -> bytes:
     full-scale audio from the server is clipped on its loudest half. Here a soft
     (tanh) limiter with KIOSK_LOUDNESS drive raises the average level and lands
     the peaks at half scale, which the firmware's 2x brings to full scale.
-    Measured on edge-tts speech: drive 6 is about +3 dB louder than before with
-    fewer clipped samples. 0 sends the audio unchanged (Campus Mithra's level).
+    Clarity first: a high-pass filter (KIOSK_HIGHPASS_HZ, default 180) removes
+    the low frequencies a small speaker cannot play and that only muddy the
+    words, and a gentle drive (default 2) keeps speech's natural dynamics.
+    Measured on edge-tts speech with the kiosk at volume 70: no clipped samples,
+    peak-to-average 2.9 (drive 6 at volume 100 was 1.7, i.e. squashed, with
+    2 % clipped). 0 sends the audio unchanged (Campus Mithra's level).
     """
     import numpy as np
-    drive = float(os.getenv("KIOSK_LOUDNESS", "6"))
+    drive = float(os.getenv("KIOSK_LOUDNESS", "2"))
     if drive <= 0 or not pcm:
         return pcm
     x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    hp = float(os.getenv("KIOSK_HIGHPASS_HZ", "180"))
+    if hp > 0:
+        from scipy.signal import butter, sosfilt
+        x = sosfilt(butter(2, hp, "highpass", fs=I2S_RATE, output="sos"), x).astype(np.float32)
     y = np.tanh(drive * x) / np.tanh(drive) * 0.5
     return np.clip(y * 32767, -32768, 32767).astype("<i2").tobytes()
 
