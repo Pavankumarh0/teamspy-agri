@@ -974,6 +974,43 @@ class DashboardPoller:
         return "D:" + ";".join(f"{k}={v}" for k, v in f.items())
 
 
+def kiosk_crops(server, esp):
+    """CROPS? from the touch screen -> the server's crop list."""
+    import httpx
+    try:
+        crops = httpx.get(f"{server}/api/krishi/fertilizer/crops", timeout=10).json()["crops"]
+        esp._send("CROPS:" + ";".join(f"{c['id']}={c['name']}" for c in crops))
+        print(f"  touch screen: crop list sent ({len(crops)} crops)")
+    except Exception as exc:
+        print(f"  touch screen: crop list failed: {exc}")
+
+
+def kiosk_fertilizer(server, esp, line):
+    """FERT:crop=tomato;area=1;n=low;p=unknown;k=high -> recommendation pages
+    (FRB/FRT/FRL.../FRE), or FRX:<message> on failure."""
+    import httpx
+    f = dict(kv.split("=", 1) for kv in line[5:].split(";") if "=" in kv)
+    try:
+        body = {"crop": f.get("crop", ""), "area_acres": float(f.get("area", "1")),
+                "n": f.get("n", "unknown"), "p": f.get("p", "unknown"), "k": f.get("k", "unknown")}
+        r = httpx.post(f"{server}/api/krishi/fertilizer", json=body, timeout=20)
+        r.raise_for_status()
+        rec = r.json()
+    except Exception as exc:
+        print(f"  fertilizer request failed: {exc}")
+        esp._send("FRX:Could not work out the recommendation. Check the PC app and server, then try again.")
+        return
+    pages = rec["screen"]["pages"]
+    clean = lambda t: re.sub(r"[|\r\n]+", " ", t)[:95]
+    lines = [f"FRB:{len(pages)}", f"FRT:{clean(rec['screen']['title'])}"]
+    lines += [f"FRL:{i}|{ln['style']}|{clean(ln['text'])}" for i, pg in enumerate(pages) for ln in pg]
+    for ln in lines + ["FRE"]:
+        esp._send(ln)
+    t = rec["totals"]
+    print(f"  fertilizer: {rec['name']} {rec['area_acres']} acre, soil card {rec['ratings']} -> "
+          f"urea {t['urea_kg']} kg, DAP {t['dap_kg']} kg, MOP {t['mop_kg']} kg  ({rec['source']['crop']})")
+
+
 def run_button_mode(server, esp, args):
     """Wait for the kiosk's talk button and answer each recording.
 
@@ -1048,6 +1085,10 @@ def run_button_mode(server, esp, args):
                 rec = None
             elif line.startswith("[esp] screen"):
                 print(f"  kiosk: {line[6:]}")
+            elif line == "CROPS?":
+                kiosk_crops(server, esp)
+            elif line.startswith("FERT:"):
+                kiosk_fertilizer(server, esp, line)
             elif line.startswith(("[esp]", "ERR")):
                 print(f"  kiosk: {line}")
     except KeyboardInterrupt:

@@ -35,7 +35,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import language, llm, sensors, speech
+import fertilizer, language, llm, sensors, speech
 from grounding import grounded_sources
 from prompts import PROMPT
 from rag import Retriever
@@ -387,6 +387,35 @@ async def sensors_ingest(body: SensorReading, authorization: str | None = Header
 async def sensors_latest(device_id: str | None = None):
     """Latest reading, server time, per-measurement validity and online/stale/offline status."""
     return sensors.summary(device_id)
+
+
+class FertilizerRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    crop: str = Field(max_length=20)
+    area_acres: float = Field(gt=0, le=100)
+    n: Literal["low", "medium", "high", "unknown"] = "unknown"
+    p: Literal["low", "medium", "high", "unknown"] = "unknown"
+    k: Literal["low", "medium", "high", "unknown"] = "unknown"
+
+
+@api.get("/fertilizer/crops")
+async def fertilizer_crops():
+    """Crops the kiosk's crop screen offers (one source of truth: fertilizer.CROPS)."""
+    return {"crops": [{"id": cid, "name": c.name, "note": c.note} for cid, c in fertilizer.CROPS.items()],
+            "areas_acres": fertilizer.AREAS, "ratings": list(fertilizer.RATING_FACTOR)}
+
+
+@api.post("/fertilizer")
+async def fertilizer_recommend(body: FertilizerRequest):
+    """Official crop dose x Soil Health Card rating -> urea/DAP/MOP per stage,
+    with the live sensor conditions; plus the pages the kiosk TFT shows."""
+    if body.crop not in fertilizer.CROPS:
+        raise HTTPException(status_code=404, detail=f"Unknown crop '{body.crop}'.")
+    rec = sensors.latest()
+    out = fertilizer.recommend(body.crop, body.area_acres, body.n, body.p, body.k, rec, sensors.status(rec))
+    title, pages = fertilizer.screen_pages(out)
+    log.info("fertilizer: %s %.2f acre N=%s P=%s K=%s -> %s", body.crop, body.area_acres, body.n, body.p, body.k, out["totals"])
+    return {**out, "screen": {"title": title, "pages": [[{"style": s, "text": t} for s, t in pg] for pg in pages]}}
 
 
 @api.get("/health")

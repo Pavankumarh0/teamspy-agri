@@ -75,6 +75,7 @@
 #include <driver/i2s.h>
 #include <driver/gpio.h>
 #include <math.h>
+#include <Preferences.h>
 #include "config.h"
 #include "rfid_receiver.h"
 
@@ -293,13 +294,13 @@ static const int16_t BAR_H = 20;
 // nothing (their state still updates), and the chat screen is redrawn whole
 // when it comes back - the same approach as the route QR above.
 // ---------------------------------------------------------------------------
-enum UiMode { UI_DASH, UI_CHAT };
+enum UiMode { UI_DASH, UI_CHAT, UI_CROP, UI_FERT };   // + crop selection, fertilizer result
 static UiMode ui = UI_DASH;
 static bool pcAlive();
 static void chatPump();                         // keeps the mic flowing during long redraws
 
 static void drawTitleBar(const char *status) {
-  if (qrShown || ui == UI_DASH) return;         // the QR / dashboard use the whole screen
+  if (qrShown || ui != UI_CHAT) return;         // the QR / dashboard use the whole screen
   tft.fillRect(0, 0, SCREEN_W, BAR_H, COL_CARD);
   tft.fillCircle(10, BAR_H / 2, 4, COL_SUN);
   tft.setTextDatum(ML_DATUM);
@@ -465,7 +466,7 @@ static void setMood(Mood m) {
   gazeX = gazeY = 0;
   fxFrame = 0;
   mouthShown = -1;
-  if (qrShown || ui == UI_DASH) return;         // drawn when the chat screen comes back
+  if (qrShown || ui != UI_CHAT) return;         // drawn when the chat screen comes back
   drawEyes();
   drawMouth(0);
   drawCheeks(m == MOOD_HAPPY || m == MOOD_TALK);
@@ -474,7 +475,7 @@ static void setMood(Mood m) {
 /* Called every loop: blinking, glancing around, the "z z" and "..." and the
    mouth moving with the speech. Everything is time-based and non-blocking. */
 static void buddyTick() {
-  if (qrShown || ui == UI_DASH) return;         // no blinking over the QR code / dashboard
+  if (qrShown || ui != UI_CHAT) return;         // no blinking over the QR code / dashboard
   const uint32_t now = millis();
 
   // a happy or confused face relaxes back to idle after a few seconds
@@ -551,7 +552,7 @@ static void drawBubble() {
 
 /* A short headline (large font if it fits) and a body text. */
 static void bubbleMessage(const char *headline, const char *body, uint16_t headColour = COL_MINT_D) {
-  if (ui == UI_DASH) return;
+  if (ui != UI_CHAT) return;
   drawBubble();
   int16_t y = IN_TOP + 4;
   if (headline && headline[0]) {
@@ -694,7 +695,7 @@ static int16_t drawQuestionStrip() {
 }
 
 static void drawAnswerPage(int page) {
-  if (ui == UI_DASH) return;
+  if (ui != UI_CHAT) return;
   if (page < 0 || page >= pageCount) return;
   drawBubble();
   answerTop = drawQuestionStrip();
@@ -729,7 +730,7 @@ static void drawAnswerPage(int page) {
 
 /* "Let me check" with pulsing dots, under the question if there is one yet. */
 static void drawThinkingBubble() {
-  if (ui == UI_DASH) return;
+  if (ui != UI_CHAT) return;
   drawBubble();
   const int16_t y = drawQuestionStrip() + 6;
   const char *msg = questionText[0] ? "Let me check" : "Hmm, one moment";
@@ -835,7 +836,7 @@ static void drawListening(const char *prompt) {
 /* The voice meter: a row of bars along the bottom of the bubble that scrolls
    as the visitor speaks. lvl is 0-100. */
 static void drawLevel(int lvl) {
-  if (ui == UI_DASH) return;
+  if (ui != UI_CHAT) return;
   lvl = lvl < 0 ? 0 : lvl > 100 ? 100 : lvl;
   memmove(meterHist, meterHist + 1, METER_BARS - 1);
   meterHist[METER_BARS - 1] = (uint8_t)lvl;
@@ -872,6 +873,23 @@ static const uint16_t D_DIM  = 0x7C70;   // #7a8f80 old / unavailable values
 static const uint16_t D_WARN = 0xF5E7;   // #f1bd3b
 static const uint16_t D_BAD  = 0xE289;   // #e5534b
 
+// Touch buttons (XPT2046, see "Touch screen" further down). Rectangles in
+// screen pixels, landscape 320x240.
+struct Btn { int16_t x, y, w, h; };
+static bool touchReady = false;           // calibrated; until then taps are ignored
+static const Btn BTN_FERT = {204, 4, 110, 22};
+
+static bool hit(const Btn &b, uint16_t x, uint16_t y) {
+  return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+}
+
+static void drawBtn(const Btn &b, const char *label, uint16_t fill, uint16_t fg, uint8_t font = 2) {
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, 6, fill);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(fg, fill);
+  tft.drawString(label, b.x + b.w / 2, b.y + b.h / 2 + 1, font);
+}
+
 static struct {
   bool have;                 // any D: line received since boot
   bool srvOk, sv, mv, td;
@@ -881,7 +899,7 @@ static struct {
 } dd;
 
 struct DField { char txt[40]; uint16_t fg; bool drawn; };
-enum { F_HEAD, F_V0, F_V1, F_V2, F_V3, F_S0, F_S1, F_S2, F_S3, F_SENSOR, F_LINK, F_AGE, F_COUNT };
+enum { F_V0, F_V1, F_V2, F_V3, F_S0, F_S1, F_S2, F_S3, F_SENSOR, F_LINK, F_AGE, F_COUNT };
 static DField dfields[F_COUNT];
 static uint16_t dotColour = 0;
 static uint32_t lastDashTickMs = 0;
@@ -975,10 +993,6 @@ static void dashUpdate() {
   const bool online = !strcmp(dd.st, "online");
   const bool live = pc && fresh && dd.srvOk && online;          // values are current measurements
 
-  // --- header: TEST DATA flag, else the subtitle ---
-  dashField(F_HEAD, 190, 4, 126, 22, 312, 15, MR_DATUM, 2, dd.have && dd.td ? "TEST DATA" : "Farm dashboard",
-            dd.have && dd.td ? D_WARN : D_MUTE, D_BAR);
-
   // --- the four cards ---
   const uint16_t vfg = live ? D_TEXT : D_DIM;
   const char *old = (dd.have && !live) ? "last known" : "";
@@ -1008,6 +1022,7 @@ static void dashUpdate() {
   if (!pc)                       { sensorTxt = "PC app offline";     dot = D_BAD; }
   else if (!dd.have || !fresh)   { sensorTxt = "Waiting for data";   dot = D_DIM; }
   else if (!dd.srvOk)            { sensorTxt = "Server unreachable"; dot = D_BAD; }
+  else if (dd.td)                { sensorTxt = "TEST DATA, not real"; dot = D_WARN; }
   else if (online)               { sensorTxt = "Sensor online";      dot = D_LEAF; }
   else if (!strcmp(dd.st, "stale"))   { sensorTxt = "Sensor stale";   dot = D_WARN; }
   else if (!strcmp(dd.st, "offline")) { sensorTxt = "Sensor offline"; dot = D_BAD; }
@@ -1039,6 +1054,7 @@ static void dashDrawFrame() {
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(D_LEAF, D_BAR);
   tft.drawString("SMART KRISHI", 26, 16, 4);
+  drawBtn(BTN_FERT, "Fertilizer >", touchReady ? D_LEAF : D_CARD, touchReady ? D_BAR : D_MUTE);
   for (int i = 0; i < 4; i++) {
     tft.fillRoundRect(CARD_X[i], CARD_Y[i], CARD_W, CARD_H, 8, D_CARD);
     tft.setTextDatum(TL_DATUM);
@@ -1047,7 +1063,7 @@ static void dashDrawFrame() {
   }
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(D_DIM, D_BG);
-  tft.drawString("Tap: chat   Hold: ask", 312, 226, 1);
+  tft.drawString(touchReady ? "Button tap: chat  hold: ask" : "Touch: hold button at power-on", 312, 226, 1);
   for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
   dotColour = 0;
   dashUpdate();
@@ -1564,6 +1580,332 @@ static int pollButton() {
 
 
 // ---------------------------------------------------------------------------
+// Touch screen (XPT2046) + crop selection + fertilizer recommendation
+// ---------------------------------------------------------------------------
+//
+// Touch shares the TFT's SPI bus; T_CS = GPIO21 (TOUCH_CS in platformio.ini).
+// T_IRQ is not used (GPIO22 is the speaker's data line): the library polls the
+// touch pressure instead. Taps only count once the screen has been calibrated
+// (stored in flash) - an unconnected controller would otherwise read as a press.
+//
+// Flow: dashboard "Fertilizer >" -> crop screen (crop, Soil Health Card N/P/K
+// rating, area) -> "Recommend" sends FERT:... to the PC, whose server answers
+// with the pages shown on the result screen. Doses come from the server
+// (official crop recommendations); this file only displays them.
+
+static Preferences prefs;
+static uint16_t touchCal[5];
+
+static void touchBegin() {
+  prefs.begin("krishi", false);
+  touchReady = prefs.getBytes("tcal", touchCal, sizeof touchCal) == sizeof touchCal;
+  if (touchReady) tft.setTouch(touchCal);
+}
+
+static void touchCalibrate() {
+  tft.fillScreen(D_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(D_TEXT, D_BG);
+  tft.drawString("Touch calibration", 160, 100, 4);
+  tft.drawString("Touch each corner arrow as it appears", 160, 136, 2);
+  delay(1500);
+  tft.calibrateTouch(touchCal, D_LEAF, D_BG, 15);      // blocks until the 4 corners are touched
+  prefs.putBytes("tcal", touchCal, sizeof touchCal);
+  tft.setTouch(touchCal);
+  touchReady = true;
+  Serial.printf("[esp] touch calibrated: %u %u %u %u %u\n", touchCal[0], touchCal[1], touchCal[2], touchCal[3], touchCal[4]);
+}
+
+// --- crop screen -------------------------------------------------------------------
+
+static const int MAX_CROPS = 6;
+static char cropId[MAX_CROPS][12], cropName[MAX_CROPS][14];
+static int  cropCount = 0, cropSel = -1;
+static uint8_t soilRating[3] = {0, 0, 0};             // N, P, K: 0 not known, 1 low, 2 medium, 3 high
+static const char *const RATING_TXT[4] = {"?", "Low", "Med", "High"};
+static const char *const RATING_ID[4] = {"unknown", "low", "medium", "high"};
+static const float AREAS[] = {0.25f, 0.5f, 1, 1.5f, 2, 2.5f, 3, 4, 5, 10};
+static const int AREA_N = sizeof AREAS / sizeof AREAS[0];
+static int  areaIdx = 2;                              // 1 acre
+static uint32_t cropsAskedMs = 0;
+
+static const Btn BTN_BACK  = {4, 3, 70, 22};
+static const Btn BTN_RATE[3] = {{96, 138, 68, 28}, {170, 138, 68, 28}, {244, 138, 68, 28}};
+static const Btn BTN_MINUS = {96, 176, 44, 28};
+static const Btn BTN_PLUS  = {268, 176, 44, 28};
+static const Btn BTN_GO    = {8, 210, 304, 26};
+
+static Btn cropBtn(int i) { return {(int16_t)(8 + (i % 3) * 104), (int16_t)(34 + (i / 3) * 50), 96, 44}; }
+
+static void drawTopBar(const char *title, const char *right = "") {
+  tft.fillRect(0, 0, SCREEN_W, 29, D_BAR);
+  drawBtn(BTN_BACK, "< Back", D_CARD, D_TEXT);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(D_LEAF, D_BAR);
+  tft.drawString(title, 84, 15, 2);
+  if (right[0]) {
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(D_MUTE, D_BAR);
+    tft.drawString(right, 314, 15, 2);
+  }
+}
+
+static void drawCropButtons() {
+  tft.fillRect(0, 30, SCREEN_W, 102, D_BG);
+  if (cropCount == 0) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(D_MUTE, D_BG);
+    tft.drawString(pcAlive() ? "Getting the crop list from the PC..." : "PC app offline - start start.ps1", 160, 80, 2);
+    return;
+  }
+  for (int i = 0; i < cropCount; i++) {
+    const bool sel = i == cropSel;
+    drawBtn(cropBtn(i), cropName[i], sel ? D_LEAF : D_CARD, sel ? D_BAR : D_TEXT, 2);
+  }
+}
+
+static void drawRatings() {
+  tft.fillRect(0, 134, SCREEN_W, 36, D_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(D_MUTE, D_BG);
+  tft.drawString("Soil card", 8, 152, 2);
+  static const char *const NUT[3] = {"N", "P", "K"};
+  for (int i = 0; i < 3; i++) {
+    char label[12];
+    snprintf(label, sizeof label, "%s: %s", NUT[i], RATING_TXT[soilRating[i]]);
+    const uint16_t fill = soilRating[i] == 0 ? D_CARD : soilRating[i] == 1 ? D_WARN : soilRating[i] == 2 ? D_LEAF : D_MUTE;
+    drawBtn(BTN_RATE[i], label, fill, soilRating[i] == 0 ? D_TEXT : D_BAR);
+  }
+}
+
+static void drawArea() {
+  tft.fillRect(0, 172, SCREEN_W, 36, D_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(D_MUTE, D_BG);
+  tft.drawString("Area", 8, 190, 2);
+  drawBtn(BTN_MINUS, "-", D_CARD, D_TEXT, 4);
+  drawBtn(BTN_PLUS, "+", D_CARD, D_TEXT, 4);
+  char a[16];
+  snprintf(a, sizeof a, "%g acre%s", AREAS[areaIdx], AREAS[areaIdx] == 1 ? "" : "s");
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(D_TEXT, D_BG);
+  tft.drawString(a, 204, 191, 2);
+}
+
+static void drawGo() {
+  const bool ok = cropSel >= 0;
+  drawBtn(BTN_GO, ok ? "Recommend fertilizer >" : "Choose a crop first", ok ? D_LEAF : D_CARD, ok ? D_BAR : D_MUTE);
+}
+
+static void drawCropScreen() {
+  tft.fillScreen(D_BG);
+  drawTopBar("Fertilizer: your crop");
+  drawCropButtons();
+  drawRatings();
+  drawArea();
+  drawGo();
+}
+
+static void enterCrop() {
+  ui = UI_CROP;
+  Serial.println(F("[esp] screen: crops"));
+  drawCropScreen();
+  if (cropCount == 0 && pcAlive()) { Serial.println(F("CROPS?")); cropsAskedMs = millis(); }
+}
+
+/* CROPS:tomato=Tomato;paddy=Paddy;... from the PC (the server's crop list). */
+static void parseCrops(char *body) {
+  cropCount = 0;
+  char *save = nullptr;
+  for (char *kv = strtok_r(body, ";", &save); kv && cropCount < MAX_CROPS; kv = strtok_r(nullptr, ";", &save)) {
+    char *eq = strchr(kv, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    dashCopy(cropId[cropCount], sizeof cropId[0], kv);
+    dashCopy(cropName[cropCount], sizeof cropName[0], eq + 1);
+    cropCount++;
+  }
+  if (cropSel >= cropCount) cropSel = -1;
+  Serial.printf("[esp] %d crops\n", cropCount);
+  if (ui == UI_CROP) { drawCropButtons(); drawGo(); }
+}
+
+// --- fertilizer result screen ----------------------------------------------------
+
+static const int FR_MAX_LINES = 48;
+struct FLine { uint8_t page; char style; char text[96]; };
+static FLine frLines[FR_MAX_LINES];
+static int  frCount = 0, frPages = 0, frPage = 0;
+static char frTitle[48] = "";
+static uint8_t frState = 0;                           // 0 nothing, 1 waiting, 2 ready, 3 error
+static char frError[96] = "";
+static uint32_t frAskedMs = 0;
+static const Btn BTN_PREV = {8, 210, 100, 26};
+static const Btn BTN_NEXT = {212, 210, 100, 26};
+
+/* Draws `text` word-wrapped from y; returns the y below it (stops at maxY). */
+static int16_t drawWrapped(const char *text, uint8_t font, uint16_t fg, int16_t y, int16_t maxY) {
+  const int16_t lineH = tft.fontHeight(font) + 2;
+  size_t pos = 0;
+  while (text[pos] && y + lineH <= maxY) {
+    const size_t next = wrapPass(text, pos, font, 304, 1, true, 8, y, fg, D_BG);
+    y += lineH;
+    if (next == pos) break;
+    pos = next;
+  }
+  return y;
+}
+
+static void drawFertScreen() {
+  tft.fillScreen(D_BG);
+  char right[8] = "";
+  if (frState == 2 && frPages > 1) snprintf(right, sizeof right, "%d/%d", frPage + 1, frPages);
+  drawTopBar(frState == 2 ? frTitle : "Fertilizer", right);
+  tft.setTextDatum(MC_DATUM);
+  if (frState == 1) {
+    tft.setTextColor(D_MUTE, D_BG);
+    tft.drawString("Working it out...", 160, 110, 4);
+    return;
+  }
+  if (frState != 2) {
+    tft.setTextColor(D_WARN, D_BG);
+    drawWrapped(frError[0] ? frError : "No recommendation yet.", 2, D_WARN, 60, 200);
+    return;
+  }
+  int16_t y = 36;
+  const int16_t maxY = frPages > 1 ? 206 : 236;
+  for (int i = 0; i < frCount && y < maxY; i++) {
+    const FLine &l = frLines[i];
+    if (l.page != frPage) continue;
+    switch (l.style) {
+      case 'H': y = drawWrapped(l.text, 2, D_LEAF, y, maxY) + 2; break;
+      case 'V': y = drawWrapped(l.text, 4, D_TEXT, y, maxY); break;
+      case 'W': y = drawWrapped(l.text, 2, D_WARN, y, maxY); break;
+      case 'S': y = drawWrapped(l.text, 1, D_MUTE, y + 2, maxY); break;
+      default:  y = drawWrapped(l.text, 2, D_TEXT, y, maxY); break;
+    }
+  }
+  if (frPages > 1) {
+    drawBtn(BTN_PREV, "< Prev", frPage > 0 ? D_CARD : D_BG, frPage > 0 ? D_TEXT : D_DIM);
+    drawBtn(BTN_NEXT, "Next >", frPage < frPages - 1 ? D_LEAF : D_BG, frPage < frPages - 1 ? D_BAR : D_DIM);
+  }
+}
+
+static void enterFert() {
+  ui = UI_FERT;
+  Serial.println(F("[esp] screen: fertilizer"));
+  drawFertScreen();
+}
+
+static void requestFertilizer() {
+  frPage = 0;
+  if (!pcAlive()) {
+    frState = 3;
+    strcpy(frError, "The PC app is not connected, so the recommendation cannot be worked out. Start start.ps1.");
+  } else {
+    frState = 1;
+    frAskedMs = millis();
+    Serial.printf("FERT:crop=%s;area=%g;n=%s;p=%s;k=%s\n", cropId[cropSel], AREAS[areaIdx],
+                  RATING_ID[soilRating[0]], RATING_ID[soilRating[1]], RATING_ID[soilRating[2]]);
+  }
+  enterFert();
+}
+
+/* FRB:<pages>, FRT:<title>, FRL:<page>|<style>|<text>, FRE (done), FRX:<error>. */
+static bool handleFertLine(char *line) {
+  if (strncmp(line, "FRB:", 4) == 0) { frCount = 0; frPages = atoi(line + 4); frTitle[0] = '\0'; return true; }
+  if (strncmp(line, "FRT:", 4) == 0) { dashCopy(frTitle, sizeof frTitle, line + 4); return true; }
+  if (strncmp(line, "FRL:", 4) == 0) {
+    char *a = line + 4, *b = strchr(a, '|');
+    if (!b || frCount >= FR_MAX_LINES) return true;
+    char *c = strchr(b + 1, '|');
+    if (!c) return true;
+    FLine &l = frLines[frCount++];
+    l.page = (uint8_t)atoi(a);
+    l.style = b[1];
+    dashCopy(l.text, sizeof l.text, c + 1);
+    return true;
+  }
+  if (strcmp(line, "FRE") == 0) {
+    frState = 2;
+    frPage = 0;
+    if (frPages < 1) frPages = 1;
+    Serial.printf("[esp] fertilizer: %d lines, %d pages\n", frCount, frPages);
+    if (ui == UI_FERT) drawFertScreen();
+    return true;
+  }
+  if (strncmp(line, "FRX:", 4) == 0) {
+    frState = 3;
+    dashCopy(frError, sizeof frError, line + 4);
+    if (ui == UI_FERT) drawFertScreen();
+    return true;
+  }
+  return false;
+}
+
+// --- taps --------------------------------------------------------------------------
+
+static void onTap(uint16_t x, uint16_t y) {
+  Serial.printf("[esp] touch %u,%u\n", x, y);
+  switch (ui) {
+    case UI_DASH:
+      if (hit(BTN_FERT, x, y)) enterCrop();
+      break;
+    case UI_CHAT:
+      if (y < BAR_H) enterDash();                       // the title bar goes back to the dashboard
+      break;
+    case UI_CROP:
+      if (hit(BTN_BACK, x, y)) { enterDash(); break; }
+      for (int i = 0; i < cropCount; i++)
+        if (hit(cropBtn(i), x, y)) { cropSel = i; drawCropButtons(); drawGo(); return; }
+      for (int i = 0; i < 3; i++)
+        if (hit(BTN_RATE[i], x, y)) { soilRating[i] = (soilRating[i] + 1) % 4; drawRatings(); return; }
+      if (hit(BTN_MINUS, x, y) && areaIdx > 0) { areaIdx--; drawArea(); break; }
+      if (hit(BTN_PLUS, x, y) && areaIdx < AREA_N - 1) { areaIdx++; drawArea(); break; }
+      if (hit(BTN_GO, x, y) && cropSel >= 0) requestFertilizer();
+      break;
+    case UI_FERT:
+      if (hit(BTN_BACK, x, y)) { enterCrop(); break; }
+      if (frState == 2 && frPages > 1) {
+        if (hit(BTN_PREV, x, y) && frPage > 0) { frPage--; drawFertScreen(); }
+        else if (hit(BTN_NEXT, x, y) && frPage < frPages - 1) { frPage++; drawFertScreen(); }
+      }
+      break;
+  }
+}
+
+static bool touchHeld = false;
+static uint32_t lastTouchPollMs = 0, lastTapMs = 0;
+
+/* Every 25 ms while idle: one tap per press (released between taps). */
+static void pollTouch() {
+  if (!touchReady || millis() - lastTouchPollMs < 25) return;
+  lastTouchPollMs = millis();
+  uint16_t x = 0, y = 0;
+  const bool down = tft.getTouch(&x, &y);
+  if (down && !touchHeld) {
+    touchHeld = true;
+    if (millis() - lastTapMs > 150) { lastTapMs = millis(); onTap(x, y); }
+  } else if (!down) {
+    touchHeld = false;
+  }
+}
+
+/* Crop list retry, result timeout. */
+static void fertTick() {
+  if (ui == UI_CROP && cropCount == 0 && pcAlive() && millis() - cropsAskedMs > 3000) {
+    Serial.println(F("CROPS?"));
+    cropsAskedMs = millis();
+  }
+  if (ui == UI_FERT && frState == 1 && millis() - frAskedMs > 20000) {
+    frState = 3;
+    strcpy(frError, "No answer from the PC app. Check that start.ps1 is running, then try again.");
+    drawFertScreen();
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // Protocol
 // ---------------------------------------------------------------------------
 
@@ -1585,6 +1927,14 @@ static void handleLine(char *line) {
 
   if (strcmp(line, "HB") == 0) { lastHbMs = millis(); return; }
   if (strcmp(line, "PING") == 0) { Serial.println(F("PONG")); return; }
+  if (handleFertLine(line)) return;                                       // FRB/FRT/FRL/FRE/FRX
+  if (strncmp(line, "CROPS:", 6) == 0) { parseCrops(line + 6); return; }
+  if (strcmp(line, "TCAL") == 0) { touchCalibrate(); enterDash(); return; }
+  if (strncmp(line, "TOUCH:", 6) == 0) {                                 // test: a tap at x,y
+    unsigned x = 0, y = 0;
+    if (sscanf(line + 6, "%u,%u", &x, &y) == 2) onTap((uint16_t)x, (uint16_t)y);
+    return;
+  }
   if (strncmp(line, "GR:", 3) == 0) { gfxRow(line + 3); return; }       // Kannada/Hindi text rows
   if (strncmp(line, "GQ:", 3) == 0) { gfxBegin(1, line + 3); return; }
   if (strncmp(line, "GA:", 3) == 0) { gfxBegin(2, line + 3); return; }
@@ -1594,7 +1944,7 @@ static void handleLine(char *line) {
     return;
   }
   if (strcmp(line, "CLR") == 0) {
-    if (ui == UI_DASH) {                       // forget the chat, keep the dashboard
+    if (ui != UI_CHAT) {                       // forget the chat, keep the current screen
       questionText[0] = '\0';
       answerSource[0] = '\0';
       pageCount = 0;
@@ -1791,6 +2141,17 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   mood = MOOD_SLEEPY;                          // the chat face, for when chat is opened
+  touchBegin();
+  // Holding the button while the board starts (1.5 s) calibrates the touch screen.
+  if (digitalRead(BTN_TALK) == LOW) {
+    const uint32_t t0 = millis();
+    while (digitalRead(BTN_TALK) == LOW && millis() - t0 < 1500) delay(10);
+    if (millis() - t0 >= 1500) {
+      touchCalibrate();
+      while (digitalRead(BTN_TALK) == LOW) delay(10);   // let go before normal use
+      btnArmed = true;
+    }
+  }
   ui = UI_DASH;                                // boot into the farm dashboard
   dashDrawFrame();
 
@@ -1811,6 +2172,8 @@ void setup() {
   if (micOk) micSlot = detectMicSlot();
   Serial.printf("[esp] button GPIO%d: tap (<%d ms) = dashboard/chat, hold = talk; debounce %d ms\n",
                 BTN_TALK, REC_MIN_MS, BTN_DEBOUNCE_MS);
+  Serial.printf("[esp] touch XPT2046 CS=%d (IRQ unused): %s\n", TOUCH_CS,
+                touchReady ? "calibrated" : "NOT calibrated - hold the button at power-on, or send TCAL");
   Serial.println(F("[esp] screen: dashboard"));
   rfidBegin(onRfidCardDetected);
   Serial.println(F("[esp] ready"));
@@ -1920,6 +2283,12 @@ void loop() {
 
   // --- dashboard: age counter and link state, once a second -----------------
   if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashTick();
+
+  // --- touch screen and the fertilizer screens (never during audio) ----------
+  if (state == ST_IDLE && !aud.active && !qrShown) {
+    pollTouch();
+    fertTick();
+  }
 
   forwardRfidEvents();
 

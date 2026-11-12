@@ -178,6 +178,60 @@ A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the
 - With no reading at all, the kiosk says it has not received any sensor data yet.
 - There is no weather source; nothing about weather is assumed.
 
+## Touch screen and fertilizer recommendation
+
+### Touch wiring (XPT2046 on the TFT module)
+
+| Touch pin | ESP32 | Notes |
+|---|---|---|
+| T_CLK | GPIO18 | shared with TFT SCK |
+| T_DIN | GPIO23 | shared with TFT MOSI |
+| T_DO | GPIO19 | shared with TFT MISO |
+| T_CS | GPIO21 | `TOUCH_CS=21` in `platformio.ini` |
+| **T_IRQ** | **not connected** | GPIO22 is the MAX98357A **DIN** (speaker data). Wiring T_IRQ there would fight the audio line. The firmware polls touch pressure instead, so IRQ isn't needed |
+
+**Calibrate once** (stored in the ESP32's flash):
+1. Hold the push button while powering on or pressing EN, for 1.5 s.
+2. Touch each corner arrow as it appears.
+
+Alternatively, send `TCAL` over serial. Until it is calibrated, taps are ignored (an unconnected touch controller would read as a press). The dashboard footer says *Touch: hold button at power-on*, and the boot log says `NOT calibrated`.
+
+### Using it
+1. On the dashboard, tap **Fertilizer >**.
+2. On the crop screen, pick a crop: Tomato, Paddy, Ragi, Maize or Onion.
+3. Optionally tap **N / P / K** to enter the *Soil Health Card* rating. Each tap cycles `?` → Low → Med → High.
+4. Set the **area** with − / + (0.25 to 10 acres), then tap **Recommend fertilizer**.
+5. The result has four pages:
+   - **Total** urea / DAP / MOP for the area.
+   - **When to apply**: each stage with its products.
+   - **Field now**: live sensor conditions.
+   - **Why**: reasons and extras such as FYM, borax and zinc sulphate.
+
+The physical button still works everywhere: tap returns to the dashboard, hold asks a question.
+
+### How the recommendation is made (`server/fertilizer.py`)
+- **Dose:** the official recommended dose and split schedule for the crop, from the TNAU Agritech portal (Tamil Nadu Agricultural University), retrieved 12 Nov 2026. Ragi uses its **Karnataka** irrigated recommendation. Every figure has its source URL and quote in the code and in `kb/09_recommended_fertilizer_doses.md`.
+
+| Crop | N:P₂O₅:K₂O kg/ha | Schedule |
+|---|---|---|
+| Tomato (varieties) | 150:100:50 | ½ N + all P, K at planting; ½ N at 30 days / earthing up |
+| Paddy (medium/long) | 150:50:50 | N and K in 4 equal splits: basal, tillering, panicle initiation, heading; P basal |
+| Ragi (irrigated, Karnataka) | 100:50:50 | ½ N + all P, K at sowing; ¼ N at 30 and ¼ at 50 days |
+| Maize (hybrid) | 150:75:75 | ¼ N + all P, K at sowing; ½ N at 25 days, ¼ at 45 days |
+| Onion (Bellary) | 100:150:75 | ½ N + all P, K at planting; ½ N at 30 days |
+
+- **Soil Health Card rating** (ICAR rule): low = dose +25 %, high = −25 %, medium or unknown = the general dose.
+- **Products:** P comes from DAP (18-46-0), whose N counts towards that stage; the rest of the N is urea (46 %); K comes from MOP (60 %). Doses are converted per stage, for the selected area.
+- **Live sensors** don't measure N, P, K or pH, so they **never change the dose**. They give the field conditions (temperature, humidity, soil moisture if calibrated) and when to apply ("feel the soil, apply to moist soil, water lightly after").
+- **Not included:**
+  - **An ML model:** no trustworthy soil-crop training data or nutrient sensor. A model trained on made-up data gives made-up doses.
+  - **Weather forecasts:** a Tomorrow.io-type API key would be needed.
+  - **Hybrid-specific doses.**
+- **Check before field use:** the figures come from TNAU, a university recommendation. Before field use, check them against UAS Bangalore's package of practices or the local agriculture officer.
+- The same doses are in the knowledge base, so a spoken "how much fertilizer for ragi?" gives the same figures. A test checks the two match.
+
+API: `GET /api/krishi/fertilizer/crops`; `POST /api/krishi/fertilizer {"crop","area_acres","n","p","k"}` returns the doses, products, stages, field conditions, sources and the screen pages.
+
 ## Languages, loudness, knowledge base
 
 - **Languages:** English, Kannada and Hindi (`KIOSK_LANGUAGES=en,kn,hi`). Kanglish and Hinglish questions get Kanglish/Hinglish answers, and pure Kannada/Hindi get pure answers, as in Campus Mithra. The TFT shows Latin script.
@@ -189,7 +243,7 @@ A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the
   `& "$env:LOCALAPPDATA\Arduino15\packages\arduino\tools\adb\32.0.0\adb.exe" shell arduino-app-cli app logs /home/arduino/ArduinoApps/smart-krishi-sensors --follow`
   (one line per reading: `soil_raw=…`, faults). Or open the app in App Lab: the sketch's own Serial Monitor lines also show the sample spread.
 - **Speaker loudness:** `KIOSK_LOUDNESS` (default 6, 0 = Campus Mithra's level). It is a soft limiter applied before the firmware's 2x gain.
-- **Knowledge base (`kb/`)** is **starter content, not yet verified**, and has no fertilizer doses. Check it against the official package of practices (UAS Bangalore / KVK) before farmers rely on it.
+- **Knowledge base (`kb/`)** is **starter content, not yet verified**. Its only fertilizer doses are the sourced ones in `09_recommended_fertilizer_doses.md`. Check it against the official package of practices (UAS Bangalore / KVK) before farmers rely on it.
 - **Back to Campus Mithra:** flash Campus Mithra's `firmware/` again.
 
 ## Tests

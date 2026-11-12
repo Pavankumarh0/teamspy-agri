@@ -218,11 +218,30 @@ class KnowledgeBaseSeparationTests(unittest.TestCase):
         for word in ("oxford", "hostel", "admission", "placement", "campus"):
             self.assertNotIn(word, text)
 
-    def test_kb_states_no_fertilizer_doses(self):
+    DOSE_FILE = "09_recommended_fertilizer_doses.md"     # the only file allowed to state doses (sourced)
+
+    def test_kb_states_doses_only_in_the_sourced_file(self):
         import re
         kb = SERVER.parent / "kb"
         for p in kb.glob("*.md"):
-            self.assertIsNone(re.search(r"\d+\s*(kg|g|ml|l|t|tonnes?)\b", p.read_text(encoding="utf-8"), re.I), p.name)
+            if p.name != self.DOSE_FILE:
+                self.assertIsNone(re.search(r"\d+\s*(kg|g|ml|l|t|tonnes?)\b", p.read_text(encoding="utf-8"), re.I), p.name)
+        self.assertIn("Source: TNAU Agritech", (kb / self.DOSE_FILE).read_text(encoding="utf-8"))
+
+    def test_kb_doses_match_the_fertilizer_screen(self):
+        """What the voice assistant can quote = what the touch screen computes from."""
+        import re
+        import fertilizer
+        text = (SERVER.parent / "kb" / self.DOSE_FILE).read_text(encoding="utf-8")
+        sections = dict(re.findall(r"^## (\w+) fertilizer dose\n(.+?)(?=\n## |\Z)", text, re.M | re.S))
+        for cid, crop in fertilizer.CROPS.items():
+            body = sections[crop.name]
+            n, p, k = crop.npk
+            if cid in ("tomato", "onion"):                  # stated as basal + top dressing, then the total
+                self.assertTrue(f"{n:g} kg nitrogen" in body or str(int(n / 2)) in body, cid)
+            else:
+                self.assertIn(f"{n:g} kg nitrogen", body, cid)
+            self.assertIn(f"{p:g} kg phosphorus", body, cid) if cid != "onion" else self.assertIn("phosphorus 150 kg", body)
 
 
 if __name__ == "__main__":
