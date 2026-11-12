@@ -1,7 +1,11 @@
+node_modules/
+dist/
 .env
-.venv/
+.env.local
 __pycache__/
 *.pyc
+venv/
+.venv/
 server/.cache/
 server/debug/
 server/data/
