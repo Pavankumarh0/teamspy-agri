@@ -103,6 +103,17 @@ CROPS: dict[str, Crop] = {
 
 AREAS = [0.25, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 10]       # acres the touch screen offers
 
+# Why each product: the nutrient it carries (its grade) and what that nutrient
+# does for the crop, in the knowledge base's words (kb/03_fertilizers_and_nutrients.md).
+PRODUCT_WHY = {
+    "urea_kg": ("Urea - for nitrogen (46% N)",
+                "Nitrogen makes leaves and stems grow. It is split because it is easily lost."),
+    "dap_kg": ("DAP - for phosphorus (46% P2O5) and some nitrogen (18% N)",
+               "Phosphorus builds roots and helps flowering, so all of it goes in at the start."),
+    "mop_kg": ("MOP (potash) - for potassium (60% K2O)",
+               "Potassium supports fruit size and quality, water use and resistance to stress."),
+}
+
 
 @dataclass
 class Region:
@@ -228,6 +239,8 @@ def recommend(crop_id: str, area_acres: float, n: str = "unknown", p: str = "unk
         "base_kg_ha": base, "dose_kg_ha": {x: round(v, 1) for x, v in dose.items()},
         "dose_for_area_kg": {x: round(v * ha, 1) for x, v in dose.items()},
         "totals": totals, "stages": stages, "extras": extras, "why": why, "field": field,
+        "product_why": [{"product": k.split("_")[0], "what": PRODUCT_WHY[k][0], "why": PRODUCT_WHY[k][1]}
+                        for k in ("urea_kg", "dap_kg", "mop_kg") if totals[k]],
         "source": {"crop": crop.source, "crop_url": crop.url, "soil_test": SOIL_TEST_SOURCE, "soil_test_url": SOIL_TEST_URL},
     }
 
@@ -269,14 +282,18 @@ def screen_pages(rec: dict) -> tuple[str, list[list[tuple[str, str]]]]:
     if "district" in rf.values():
         p1.append(("S", f"* assumed from {rec['region']['name']} district soil surveys"))
     p1.append(("S", f"{rec['note']}. Source: {rec['source']['crop']}"))
-    p2 = [("H", "When to apply")]
+    p2 = [("H", "Why these fertilizers")]
+    for pw in rec["product_why"]:
+        p2.append(("W", pw["what"]))
+        p2.append(("T", pw["why"]))
+    p3 = [("H", "When to apply")]
     for s in rec["stages"]:
         parts = [f"{lbl} {_fmt(s[k])} kg" for lbl, k in (("Urea", "urea_kg"), ("DAP", "dap_kg"), ("MOP", "mop_kg")) if s[k]]
-        p2.append(("W", s["when"]))
-        p2.append(("T", "  " + (", ".join(parts) or "nothing")))
-    p3 = [("H", "Field now (live sensors)")] + [("T", x) for x in rec["field"]]
-    p4 = [("H", "Why")] + [("T", x) for x in rec["why"]]
-    for e in rec["extras"]:
-        p4.append(("T", f"Also: {e['what']} {_fmt(e['amount'])} {e['unit']}"))
+        p3.append(("W", s["when"]))
+        p3.append(("T", "  " + (", ".join(parts) or "nothing")))
+    p4 = [("H", "Why this amount")] + [("T", x) for x in rec["why"]]
     p4.append(("S", "Follow your Soil Health Card or local agriculture officer if they differ."))
-    return title, [p1, p2, p3, p4]
+    p5 = [("H", "Field now (live sensors)")] + [("T", x) for x in rec["field"]]
+    for e in rec["extras"]:
+        p5.append(("T", f"Also: {e['what']} {_fmt(e['amount'])} {e['unit']}"))
+    return title, [p1, p2, p3, p4, p5]

@@ -78,6 +78,7 @@
 #include <Preferences.h>
 #include "config.h"
 #include "rfid_receiver.h"
+#include "lang_names.h"
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -211,6 +212,230 @@ static int linesFor(uint8_t font, int16_t h) {
 
 
 // ---------------------------------------------------------------------------
+// Screen language: English, Kannada or Hindi
+// ---------------------------------------------------------------------------
+//
+// The TFT fonts are ASCII only. In Kannada / Hindi every piece of screen text
+// goes through uiDraw() / uiWrap(): the first time a text is needed the kiosk
+// asks the PC for it (TRQ: line); the PC translates it (server ui_i18n:
+// hand-checked overrides, cache, Sarvam), renders it in Nirmala UI with proper
+// shaping (kiosk_text.py) and sends it back as a 1-bit bitmap (LB:/LR: lines).
+// Until it arrives the English text is shown, and the screen is redrawn once
+// a batch of labels has come in. Text without letters (numbers) stays ASCII.
+
+static uint8_t uiLang = 0;                          // 0 English, 1 Kannada, 2 Hindi
+static inline int hexNibble(char c);
+static const char *const LANG_CODE[3] = {"en", "kn", "hi"};
+static bool pcAlive();
+
+struct UiLabel { uint32_t key, off, usedMs; uint16_t w, h; };
+static const int LBL_MAX = 200;
+static UiLabel lbls[LBL_MAX];
+static int lblCount = 0;
+static uint8_t *lblPool = nullptr;                  // allocated in setup()
+static size_t lblPoolSize = 0, lblUsed = 0;
+static struct { uint32_t key, ms; int8_t origin; } lblPend[64];
+static int lblPendCount = 0;
+static int8_t uiOrigin = -1;                        // set by dashField/dashValue while drawing
+static bool lblArrived = false;                     // redraw the whole screen once quiet
+static uint32_t lblFieldsDirty = 0;                 // or just these dashboard fields
+static uint32_t lblArrivedMs = 0;
+// receiving
+static uint32_t lbKey = 0;
+static int lbW = 0, lbH = 0, lbRow = 0;
+static bool lbStore = false;
+static uint8_t lbBuf[40];                           // one row while the pool is full
+
+// Line height of a rendered label (kiosk_text.LABEL_PX * 1.38) per TFT font.
+static int16_t uiLineH(uint8_t font) {
+  if (uiLang == 0) return tft.fontHeight(font) + 2;
+  return font == 1 ? 18 : font == 4 ? 30 : 22;
+}
+
+static bool hasLetters(const char *s) {
+  for (; *s; s++) if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z')) return true;
+  return false;
+}
+
+static uint32_t uiKey(const char *s, uint8_t font, int16_t maxW, uint8_t lines) {
+  uint32_t h = 2166136261u;
+  for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+  const uint8_t extra[4] = {font, (uint8_t)(maxW & 0xff), (uint8_t)(maxW >> 8), (uint8_t)(lines * 4 + uiLang)};
+  for (uint8_t b : extra) { h ^= b; h *= 16777619u; }
+  return h ? h : 1;
+}
+
+static int uiFind(uint32_t key) {
+  for (int i = 0; i < lblCount; i++) if (lbls[i].key == key) return i;
+  return -1;
+}
+
+static void uiForgetAll() {
+  lblCount = 0;
+  lblUsed = 0;
+  lblPendCount = 0;
+  lbKey = 0;
+}
+
+/* Ask the PC for a text once (again after 8 s if it never came). */
+static void uiRequest(uint32_t key, uint8_t font, int16_t maxW, uint8_t lines, const char *s) {
+  if (!pcAlive()) return;                           // asked for again on the next redraw
+  const uint32_t now = millis();
+  for (int i = 0; i < lblPendCount; i++) {
+    if (lblPend[i].key == key) {
+      if (now - lblPend[i].ms < 8000) return;
+      lblPend[i].ms = now;
+      goto send;
+    }
+  }
+  if (lblPendCount == 64) lblPendCount = 0;
+  lblPend[lblPendCount].key = key;
+  lblPend[lblPendCount].ms = now;
+  lblPend[lblPendCount].origin = uiOrigin;
+  lblPendCount++;
+send:
+  char clean[200];
+  size_t n = 0;
+  for (; *s && n < sizeof clean - 1; s++) clean[n++] = (*s == '\n' || *s == '\r') ? ' ' : *s;
+  clean[n] = '\0';
+  Serial.printf("TRQ:%08lx|%s|%u|%d|%u|%s\n", (unsigned long)key, LANG_CODE[uiLang], font, maxW, lines, clean);
+}
+
+/* Any 1-bit bitmap (rows MSB first, (w+7)/8 bytes) as runs of one colour. */
+static void blitBits(const uint8_t *rows, int16_t w, int16_t h, int16_t x, int16_t y, uint16_t fg, uint16_t bg) {
+  if (x < 0) x = 0;
+  if (x + w > SCREEN_W) w = SCREEN_W - x;
+  if (y + h > SCREEN_H) h = SCREEN_H - y;
+  if (w <= 0 || h <= 0) return;
+  const int bpr = (w + 7) / 8;
+  tft.startWrite();
+  tft.setAddrWindow(x, y, w, h);
+  for (int r = 0; r < h; r++) {
+    const uint8_t *row = rows + r * bpr;
+    bool on = false;
+    uint32_t run = 0;
+    for (int c = 0; c < w; c++) {
+      const bool px = row[c >> 3] & (0x80 >> (c & 7));
+      if (px != on && run) { tft.pushColor(on ? fg : bg, run); run = 0; }
+      on = px;
+      run++;
+    }
+    tft.pushColor(on ? fg : bg, run);
+  }
+  tft.endWrite();
+}
+
+static void uiBlit(int idx, int16_t x, int16_t y, uint8_t datum, uint16_t fg, uint16_t bg) {
+  const UiLabel &l = lbls[idx];
+  const int hz = datum <= 8 ? datum % 3 : datum - 9;        // 0 left, 1 centre, 2 right
+  const int vt = datum <= 8 ? datum / 3 : 2;                // 0 top, 1 middle, 2 bottom / baseline
+  const int16_t x0 = x - (hz == 1 ? l.w / 2 : hz == 2 ? l.w : 0);
+  const int16_t y0 = y - (vt == 1 ? l.h / 2 : vt == 2 ? l.h : 0);
+  blitBits(lblPool + l.off, l.w, l.h, x0, y0, fg, bg);
+  lbls[idx].usedMs = millis();
+}
+
+/* Drop-in for tft.drawString(): same datum and colours. In Kannada / Hindi it
+   draws the PC-rendered label (maxW: room available, 0 = up to the screen). */
+static int16_t uiDraw(const char *s, int32_t x, int32_t y, uint8_t font, int16_t maxW = 0) {
+  if (uiLang == 0 || !hasLetters(s) || !lblPool) return tft.drawString(s, x, y, font);
+  const uint32_t key = uiKey(s, font, maxW, 1);
+  const int idx = uiFind(key);
+  if (idx < 0) {
+    uiRequest(key, font, maxW, 1, s);
+    return tft.drawString(s, x, y, font);
+  }
+  uiBlit(idx, x, y, tft.getTextDatum(), tft.textcolor, tft.textbgcolor);
+  return lbls[idx].w;
+}
+
+/* Word-wrapped text at (x, y), top-left, within maxW x maxH; returns the height
+   used. English: the usual ASCII wrap. Kannada / Hindi: one PC-rendered label. */
+static int16_t uiWrap(const char *s, int16_t x, int16_t y, uint8_t font, int16_t maxW, int16_t maxH,
+                      uint16_t fg, uint16_t bg) {
+  const int16_t lineH = uiLineH(font);
+  const int maxLines = maxH / lineH;
+  if (maxLines <= 0) return 0;
+  if (uiLang != 0 && hasLetters(s) && lblPool) {
+    const uint32_t key = uiKey(s, font, maxW, (uint8_t)maxLines);
+    const int idx = uiFind(key);
+    if (idx >= 0) {
+      uiBlit(idx, x, y, TL_DATUM, fg, bg);
+      return lbls[idx].h;
+    }
+    uiRequest(key, font, maxW, (uint8_t)maxLines, s);
+  }
+  const int16_t asciiH = tft.fontHeight(font) + 2;
+  size_t pos = 0;
+  int16_t used = 0;
+  while (s[pos] && used + asciiH <= maxH) {
+    const size_t next = wrapPass(s, pos, font, maxW, 1, true, x, y + used, fg, bg);
+    used += asciiH;
+    if (next == pos) break;
+    pos = next;
+  }
+  return used;
+}
+
+/* Pool full: keep only the labels the current screen used in the last 3 s. */
+static void uiCompact() {
+  size_t used = 0;
+  int n = 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < lblCount; i++) {
+    if (now - lbls[i].usedMs > 3000) continue;
+    const size_t sz = (size_t)((lbls[i].w + 7) / 8) * lbls[i].h;
+    if (lbls[i].off != used) memmove(lblPool + used, lblPool + lbls[i].off, sz);
+    lbls[n] = lbls[i];
+    lbls[n].off = used;
+    used += sz;
+    n++;
+  }
+  lblCount = n;
+  lblUsed = used;
+}
+
+/* LB:<key>|<w>,<h> - a label follows as h "LR:<hex>" rows. */
+static void uiLabelBegin(const char *args) {
+  unsigned long key = 0;
+  int w = 0, h = 0;
+  if (sscanf(args, "%lx|%d,%d", &key, &w, &h) != 3 || w <= 0 || w > SCREEN_W || h <= 0 || h > SCREEN_H) {
+    lbKey = 0;
+    return;
+  }
+  lbKey = key; lbW = w; lbH = h; lbRow = 0;
+  const size_t sz = (size_t)((w + 7) / 8) * h;
+  if (lblPool && lblUsed + sz > lblPoolSize) uiCompact();
+  lbStore = lblPool && lblUsed + sz <= lblPoolSize && lblCount < LBL_MAX && uiFind(key) < 0;
+  if (lbStore) memset(lblPool + lblUsed, 0, sz);
+}
+
+static void uiLabelRow(const char *hex) {
+  if (!lbKey) return;
+  const int bpr = (lbW + 7) / 8;
+  uint8_t *dst = lbStore ? lblPool + lblUsed + (size_t)lbRow * bpr : lbBuf;
+  for (int i = 0; i < bpr && i < 40 && hex[2 * i] && hex[2 * i + 1]; i++) {
+    const int hi = hexNibble(hex[2 * i]), lo = hexNibble(hex[2 * i + 1]);
+    if (hi < 0 || lo < 0) break;
+    dst[i] = (uint8_t)(hi << 4 | lo);
+  }
+  if (++lbRow < lbH) return;
+  int8_t origin = -1;
+  for (int i = 0; i < lblPendCount; i++)
+    if (lblPend[i].key == lbKey) { origin = lblPend[i].origin; lblPend[i] = lblPend[--lblPendCount]; break; }
+  if (lbStore) {
+    UiLabel &l = lbls[lblCount++];
+    l.key = lbKey; l.off = lblUsed; l.w = lbW; l.h = lbH; l.usedMs = millis();
+    lblUsed += (size_t)bpr * lbH;
+    if (origin >= 0) lblFieldsDirty |= 1u << origin;   // repaint just that dashboard field
+    else lblArrived = true;
+    lblArrivedMs = millis();
+  }
+  lbKey = 0;
+}
+
+
+// ---------------------------------------------------------------------------
 // Route QR code
 // ---------------------------------------------------------------------------
 
@@ -294,12 +519,15 @@ static const int16_t BAR_H = 20;
 // nothing (their state still updates), and the chat screen is redrawn whole
 // when it comes back - the same approach as the route QR above.
 // ---------------------------------------------------------------------------
-enum UiMode { UI_DASH, UI_CHAT, UI_CROP, UI_FERT };   // + crop selection, fertilizer result
+enum UiMode { UI_DASH, UI_CHAT, UI_CROP, UI_FERT, UI_LANG };   // + crops, fertilizer, language choice
 static UiMode ui = UI_DASH;
 static bool pcAlive();
 static void chatPump();                         // keeps the mic flowing during long redraws
 
+static char titleStatus[32] = "ready";
+
 static void drawTitleBar(const char *status) {
+  if (status != titleStatus) { strncpy(titleStatus, status, sizeof titleStatus - 1); titleStatus[sizeof titleStatus - 1] = 0; }
   if (qrShown || ui != UI_CHAT) return;         // the QR / dashboard use the whole screen
   tft.fillRect(0, 0, SCREEN_W, BAR_H, COL_CARD);
   tft.fillCircle(10, BAR_H / 2, 4, COL_SUN);
@@ -308,7 +536,7 @@ static void drawTitleBar(const char *status) {
   tft.drawString("SMART KRISHI AI", 20, BAR_H / 2 + 1, 2);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(COL_DIM, COL_CARD);
-  tft.drawString(status, SCREEN_W - 6, BAR_H / 2 + 1, 2);
+  uiDraw(status, SCREEN_W - 6, BAR_H / 2 + 1, 2, 150);
 }
 
 
@@ -551,7 +779,13 @@ static void drawBubble() {
 }
 
 /* A short headline (large font if it fits) and a body text. */
+static const char *lastHead = "", *lastBody = "";      // for a redraw in another language
+static uint16_t lastHeadColour = 0;
+
 static void bubbleMessage(const char *headline, const char *body, uint16_t headColour = COL_MINT_D) {
+  lastHead = headline ? headline : "";
+  lastBody = body ? body : "";
+  lastHeadColour = headColour;
   if (ui != UI_CHAT) return;
   drawBubble();
   int16_t y = IN_TOP + 4;
@@ -559,12 +793,10 @@ static void bubbleMessage(const char *headline, const char *body, uint16_t headC
     const uint8_t f = tft.textWidth(headline, 4) <= IN_W ? 4 : 2;
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(headColour, COL_BUBBLE);
-    tft.drawString(headline, IN_X, y, f);
-    y += tft.fontHeight(f) + 8;
+    uiDraw(headline, IN_X, y, f, IN_W);
+    y += uiLineH(f) + 6;
   }
-  if (body && body[0]) {
-    wrapPass(body, 0, 2, IN_W, linesFor(2, IN_BOTTOM - y), true, IN_X, y, COL_INK, COL_BUBBLE);
-  }
+  if (body && body[0]) uiWrap(body, IN_X, y, 2, IN_W, IN_BOTTOM - y, COL_INK, COL_BUBBLE);
 }
 
 // --- the visitor's question + Mithra's answer, paged -------------------------
@@ -648,7 +880,7 @@ static void gfxBegin(int target, const char *args) {
   }
 }
 
-static inline int hexNibble(char c) {
+static inline int hexNibble(char c) {  // (declared earlier, used by the label store too)
   return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
 }
 
@@ -673,7 +905,7 @@ static int16_t drawQuestionStrip() {
   if (gfxQShown) {
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(COL_MUTE, COL_BUBBLE);
-    tft.drawString("You asked", IN_X, IN_TOP, 1);
+    uiDraw("You asked", IN_X, IN_TOP, 1, IN_W);
     const int16_t qTop = IN_TOP + 10;
     drawGfx(gfxQ, gfxQH, IN_X, qTop, FOOT_Y, COL_MINT_D, COL_BUBBLE);
     const int16_t bottom = qTop + gfxQH + 3;   // kiosk_text.ANSWER_GAP = 3 + 5
@@ -683,7 +915,7 @@ static int16_t drawQuestionStrip() {
   if (!questionText[0]) return IN_TOP + 2;
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_MUTE, COL_BUBBLE);
-  tft.drawString("You asked", IN_X, IN_TOP, 1);
+  uiDraw("You asked", IN_X, IN_TOP, 1, IN_W);
   const int16_t qTop = IN_TOP + 10;
   wrapPass(questionText, 0, 2, IN_W, 2, true, IN_X, qTop, COL_MINT_D, COL_BUBBLE);
   // how many lines did it take (1 or 2)?
@@ -737,8 +969,8 @@ static void drawThinkingBubble() {
   const uint8_t f = tft.textWidth(msg, 4) + 36 <= IN_W ? 4 : 2;
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_INK, COL_BUBBLE);
-  tft.drawString(msg, IN_X, y, f);
-  thinkX = IN_X + tft.textWidth(msg, f) + 8;
+  const int16_t mw = uiDraw(msg, IN_X, y, f, IN_W - 40);
+  thinkX = IN_X + mw + 8;
   thinkY = y + tft.fontHeight(f) - 7;
   drawThinkDots();
 }
@@ -878,6 +1110,7 @@ static const uint16_t D_BAD  = 0xE289;   // #e5534b
 struct Btn { int16_t x, y, w, h; };
 static bool touchReady = false;           // calibrated; until then taps are ignored
 static const Btn BTN_FERT = {204, 4, 110, 22};
+static const Btn BTN_LANGSW = {214, 214, 102, 22};   // dashboard footer: change language
 
 static bool hit(const Btn &b, uint16_t x, uint16_t y) {
   return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
@@ -887,7 +1120,7 @@ static void drawBtn(const Btn &b, const char *label, uint16_t fill, uint16_t fg,
   tft.fillRoundRect(b.x, b.y, b.w, b.h, 6, fill);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(fg, fill);
-  tft.drawString(label, b.x + b.w / 2, b.y + b.h / 2 + 1, font);
+  uiDraw(label, b.x + b.w / 2, b.y + b.h / 2 + 1, font, b.w - 6);
 }
 
 static struct {
@@ -959,7 +1192,9 @@ static void dashField(int id, int16_t rx, int16_t ry, int16_t rw, int16_t rh, in
   tft.fillRect(rx, ry, rw, rh, bg);
   tft.setTextDatum(datum);
   tft.setTextColor(fg, bg);
-  tft.drawString(txt, ax, ay, font);
+  uiOrigin = (int8_t)id;
+  uiDraw(txt, ax, ay, font, rw);
+  uiOrigin = -1;
 }
 
 /* A card's big value with its unit ("deg" = a degree sign + C). The cache key
@@ -977,8 +1212,10 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   const uint8_t font = tft.textWidth(value, 4) + 30 <= w ? 4 : 2;     // "Not calibrated" uses font 2
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(fg, D_CARD);
-  tft.drawString(value, x, font == 4 ? y + 1 : y + 6, font);
-  int16_t ux = x + tft.textWidth(value, font) + 4;
+  uiOrigin = (int8_t)(F_V0 + i);
+  const int16_t vw = uiDraw(value, x, font == 4 ? y + 1 : y + 6, font, w);
+  uiOrigin = -1;
+  int16_t ux = x + vw + 4;
   if (!strcmp(unit, "deg")) {
     tft.drawCircle(ux + 2, y + 5, 2, fg);
     tft.drawString("C", ux + 6, y + 4, 2);
@@ -999,9 +1236,9 @@ static void dashBar(int pct, uint16_t colour) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(D_MUTE, D_CARD);
   tft.fillRect(bx, by + bh + 2, bw, 10, D_CARD);
-  tft.drawString("dry", bx, by + bh + 3, 1);
+  uiDraw("dry", bx, by + bh + 3, 1, 60);
   tft.setTextDatum(TR_DATUM);
-  tft.drawString("wet", bx + bw, by + bh + 3, 1);
+  uiDraw("wet", bx + bw, by + bh + 3, 1, 60);
 }
 
 static void dashSub(int i, const char *txt, uint16_t fg) {
@@ -1065,14 +1302,17 @@ static void dashUpdate() {
   if (dd.have && dd.age >= 0) {
     const unsigned long a = (unsigned long)dd.age + (millis() - dd.rxMs) / 1000;
     char ago[16];
-    if (a < 120) snprintf(ago, sizeof ago, "%lus", a);
+    // Coarse steps, so the text (and in Kannada / Hindi its label) changes rarely.
+    if (a < 10) ago[0] = '\0';
+    else if (a < 120) snprintf(ago, sizeof ago, "%lu s", a / 10 * 10);
     else if (a < 7200) snprintf(ago, sizeof ago, "%lu min", a / 60);
     else snprintf(ago, sizeof ago, "%lu h", a / 3600);
-    snprintf(buf, sizeof buf, "%s %s ago", live ? "Updated" : "Last reading", ago);
+    if (!ago[0]) snprintf(buf, sizeof buf, "%s just now", live ? "Updated" : "Last reading");
+    else snprintf(buf, sizeof buf, "%s %s ago", live ? "Updated" : "Last reading", ago);
   } else {
     snprintf(buf, sizeof buf, "No reading yet");
   }
-  dashField(F_AGE, 4, 218, 196, 16, 10, 226, ML_DATUM, 2, buf, live ? D_MUTE : D_WARN, D_BG);
+  dashField(F_AGE, 4, 216, 206, 20, 10, 226, ML_DATUM, 2, buf, live ? D_MUTE : D_WARN, D_BG);
 }
 
 static void dashDrawFrame() {
@@ -1087,11 +1327,15 @@ static void dashDrawFrame() {
     tft.fillRoundRect(CARD_X[i], CARD_Y[i], CARD_WS[i], CARD_H, 8, D_CARD);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(D_MUTE, D_CARD);
-    tft.drawString(CARD_LABEL[i], CARD_X[i] + 10, CARD_Y[i] + 7, 2);
+    uiDraw(CARD_LABEL[i], CARD_X[i] + 10, CARD_Y[i] + 4, 2, CARD_WS[i] - 20);
   }
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(D_DIM, D_BG);
-  tft.drawString(touchReady ? "Button tap: chat  hold: ask" : "Press screen firmly to set up touch", 312, 226, 1);
+  if (touchReady) {
+    drawBtn(BTN_LANGSW, "Language", D_CARD, D_TEXT);
+  } else {
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(D_DIM, D_BG);
+    uiDraw("Press screen firmly to set up touch", 312, 226, 1, 200);
+  }
   for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
   barShown = -2;
   dotColour = 0;
@@ -1139,7 +1383,10 @@ static void enterDash() {
   dashDrawFrame();
 }
 
+static void langCycle();
+
 static void toggleScreen() {
+  if (ui == UI_LANG) { langCycle(); return; }   // on the language screen a tap moves the choice
   if (ui == UI_DASH) enterChat();
   else enterDash();
 }
@@ -1643,9 +1890,9 @@ static void touchCalibrate() {
     tft.fillScreen(D_BG);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(D_TEXT, D_BG);
-    tft.drawString(attempt == 1 ? "Touch calibration" : "Let's try again", 160, 96, 4);
-    tft.drawString("An arrow appears in each corner in turn.", 160 , 132, 2);
-    tft.drawString("Touch exactly on the arrow tip each time.", 160, 152, 2);
+    uiDraw(attempt == 1 ? "Touch calibration" : "Let's try again", 160, 96, 4, 300);
+    uiDraw("An arrow appears in each corner in turn.", 160, 132, 2, 300);
+    uiDraw("Touch exactly on the arrow tip each time.", 160, 156, 2, 300);
     delay(2500);
     uint16_t cal[5];
     tft.calibrateTouch(cal, D_LEAF, D_BG, 15);         // blocks until the 4 corners are touched
@@ -1699,7 +1946,7 @@ static void drawTopBar(const char *title, const char *right = "") {
   drawBtn(BTN_BACK, "< Back", D_CARD, D_TEXT);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(D_LEAF, D_BAR);
-  tft.drawString(title, 84, 15, 2);
+  uiDraw(title, 80, 15, 2, 230);
   if (right[0]) {
     tft.setTextDatum(MR_DATUM);
     tft.setTextColor(D_MUTE, D_BAR);
@@ -1712,7 +1959,7 @@ static void drawCropButtons() {
   if (cropCount == 0) {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(D_MUTE, D_BG);
-    tft.drawString(pcAlive() ? "Getting the crop list from the PC..." : "PC app offline - start start.ps1", 160, 80, 2);
+    uiDraw(pcAlive() ? "Getting the crop list from the PC..." : "PC app offline - start start.ps1", 160, 80, 2, 300);
     return;
   }
   for (int i = 0; i < cropCount; i++) {
@@ -1725,7 +1972,7 @@ static void drawRatings() {
   tft.fillRect(0, 134, SCREEN_W, 36, D_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(D_MUTE, D_BG);
-  tft.drawString("Soil card", 8, 152, 2);
+  uiDraw("Soil card", 8, 152, 2, 86);
   static const char *const NUT[3] = {"N", "P", "K"};
   for (int i = 0; i < 3; i++) {
     char label[12];
@@ -1739,14 +1986,14 @@ static void drawArea() {
   tft.fillRect(0, 172, SCREEN_W, 36, D_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(D_MUTE, D_BG);
-  tft.drawString("Area", 8, 190, 2);
+  uiDraw("Area", 8, 190, 2, 86);
   drawBtn(BTN_MINUS, "-", D_CARD, D_TEXT, 4);
   drawBtn(BTN_PLUS, "+", D_CARD, D_TEXT, 4);
   char a[16];
   snprintf(a, sizeof a, "%g acre%s", AREAS[areaIdx], AREAS[areaIdx] == 1 ? "" : "s");
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(D_TEXT, D_BG);
-  tft.drawString(a, 204, 191, 2);
+  uiDraw(a, 204, 191, 2, 124);
 }
 
 static void drawRegionBtn() {
@@ -1837,15 +2084,7 @@ static const Btn BTN_NEXT = {212, 210, 100, 26};
 
 /* Draws `text` word-wrapped from y; returns the y below it (stops at maxY). */
 static int16_t drawWrapped(const char *text, uint8_t font, uint16_t fg, int16_t y, int16_t maxY) {
-  const int16_t lineH = tft.fontHeight(font) + 2;
-  size_t pos = 0;
-  while (text[pos] && y + lineH <= maxY) {
-    const size_t next = wrapPass(text, pos, font, 304, 1, true, 8, y, fg, D_BG);
-    y += lineH;
-    if (next == pos) break;
-    pos = next;
-  }
-  return y;
+  return y + uiWrap(text, 8, y, font, 304, maxY - y, fg, D_BG);
 }
 
 static void drawFertScreen() {
@@ -1856,7 +2095,7 @@ static void drawFertScreen() {
   tft.setTextDatum(MC_DATUM);
   if (frState == 1) {
     tft.setTextColor(D_MUTE, D_BG);
-    tft.drawString("Working it out...", 160, 110, 4);
+    uiDraw("Working it out...", 160, 110, 4, 300);
     return;
   }
   if (frState != 2) {
@@ -1936,6 +2175,107 @@ static bool handleFertLine(char *line) {
   return false;
 }
 
+// --- language screen (shown at power-on) ------------------------------------------
+//
+// English, Kannada, Hindi. Touch one to choose; the push button moves the
+// highlight; after LANG_AUTO_S seconds the highlighted one (the last choice,
+// remembered in flash) is taken, so the kiosk never waits forever.
+
+static const Btn BTN_LANG[3] = {{30, 64, 260, 50}, {30, 122, 260, 50}, {30, 180, 260, 50}};
+static const uint32_t LANG_AUTO_S = 20;
+static int langHi = 0;
+static uint32_t langShownMs = 0;
+static int langSecsShown = -1;
+
+static void drawPgm(const LangBitmap &b, int16_t cx, int16_t cy, uint16_t fg, uint16_t bg) {
+  blitBits(b.data, b.w, b.h, cx - b.w / 2, cy - b.h / 2, fg, bg);
+}
+
+static void drawLangButton(int i) {
+  const Btn &b = BTN_LANG[i];
+  const bool sel = i == langHi;
+  const uint16_t fill = sel ? D_LEAF : D_CARD, fg = sel ? D_BAR : D_TEXT;
+  tft.drawRoundRect(b.x - 3, b.y - 3, b.w + 6, b.h + 6, 10, sel ? D_TEXT : D_BG);
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, 8, fill);
+  const int16_t cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  if (i == 0) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(fg, fill);
+    tft.drawString("English", cx, cy + 1, 4);
+  } else {
+    drawPgm(i == 1 ? LANG_KN : LANG_HI, cx, cy, fg, fill);
+  }
+}
+
+static void drawLangScreen() {
+  tft.fillScreen(D_BG);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(D_LEAF, D_BG);
+  tft.drawString("Choose language", 160, 4, 4);
+  drawPgm(LANG_PROMPT_KN, 100, 46, D_MUTE, D_BG);
+  drawPgm(LANG_PROMPT_HI, 252, 46, D_MUTE, D_BG);
+  for (int i = 0; i < 3; i++) drawLangButton(i);
+  langSecsShown = -1;
+}
+
+static void enterLang() {
+  ui = UI_LANG;
+  langHi = uiLang;
+  langShownMs = millis();
+  Serial.println(F("[esp] screen: language"));
+  drawLangScreen();
+}
+
+static void langCycle() {
+  langHi = (langHi + 1) % 3;
+  langShownMs = millis();
+  for (int i = 0; i < 3; i++) drawLangButton(i);
+}
+
+static void setLanguage(int i) {
+  uiLang = (uint8_t)i;
+  prefs.putUChar("lang", uiLang);
+  uiForgetAll();
+  Serial.printf("LANG:%s\n", LANG_CODE[uiLang]);
+  Serial.printf("[esp] language: %s\n", LANG_CODE[uiLang]);
+  enterDash();
+}
+
+/* Countdown in the corner, and the automatic choice. */
+static void langTick() {
+  const int left = (int)LANG_AUTO_S - (int)((millis() - langShownMs) / 1000);
+  if (left <= 0) { setLanguage(langHi); return; }
+  if (left == langSecsShown) return;
+  langSecsShown = left;
+  char t[6];
+  snprintf(t, sizeof t, "%d", left);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(D_DIM, D_BG);
+  tft.setTextPadding(24);
+  tft.drawString(t, 316, 15, 2);
+  tft.setTextPadding(0);
+}
+
+/* The current screen again - after labels arrived, or after calibration. */
+static void redrawChat() {
+  tft.fillScreen(COL_BG);
+  drawBuddy();
+  if (pageCount > 0) drawAnswerPage(pageShown >= 0 && pageShown < pageCount ? pageShown : 0);
+  else if (mood == MOOD_THINK && questionText[0]) drawThinkingBubble();
+  else bubbleMessage(lastHead, lastBody, lastHeadColour ? lastHeadColour : COL_MINT_D);
+  drawTitleBar(titleStatus);
+}
+
+static void redrawScreen() {
+  switch (ui) {
+    case UI_DASH: dashDrawFrame(); break;
+    case UI_CROP: drawCropScreen(); break;
+    case UI_FERT: drawFertScreen(); break;
+    case UI_LANG: drawLangScreen(); break;
+    case UI_CHAT: redrawChat(); break;
+  }
+}
+
 // --- taps --------------------------------------------------------------------------
 
 static void onTap(uint16_t x, uint16_t y) {
@@ -1943,6 +2283,11 @@ static void onTap(uint16_t x, uint16_t y) {
   switch (ui) {
     case UI_DASH:
       if (hit(BTN_FERT, x, y)) enterCrop();
+      else if (hit(BTN_LANGSW, x, y)) enterLang();
+      break;
+    case UI_LANG:
+      for (int i = 0; i < 3; i++)
+        if (hit(BTN_LANG[i], x, y)) { langHi = i; drawLangButton(0); drawLangButton(1); drawLangButton(2); setLanguage(i); return; }
       break;
     case UI_CHAT:
       if (y < BAR_H) enterDash();                       // the title bar goes back to the dashboard
@@ -2023,7 +2368,7 @@ static void pollTouch() {
       uncalPresses = 0;
       Serial.println(F("[esp] touch pressed on an uncalibrated screen - calibrating"));
       touchCalibrate();
-      enterDash();
+      redrawScreen();
     }
     return;
   }
@@ -2073,11 +2418,17 @@ static void handleLine(char *line) {
   lastPcMs = millis();                         // any line proves the PC app is there
 
   if (strcmp(line, "HB") == 0) { lastHbMs = millis(); return; }
-  if (strcmp(line, "PING") == 0) { Serial.println(F("PONG")); return; }
+  if (strcmp(line, "PING") == 0) {
+    Serial.println(F("PONG"));
+    Serial.printf("LANG:%s\n", LANG_CODE[uiLang]);   // the PC answers in the screen language
+    return;
+  }
+  if (strncmp(line, "LR:", 3) == 0) { uiLabelRow(line + 3); return; }      // screen text rows
+  if (strncmp(line, "LB:", 3) == 0) { uiLabelBegin(line + 3); return; }
   if (handleFertLine(line)) return;                                       // FRB/FRT/FRL/FRE/FRX
   if (strncmp(line, "CROPS:", 6) == 0) { parseCrops(line + 6); return; }
   if (strncmp(line, "REGIONS:", 8) == 0) { parseRegions(line + 8); return; }
-  if (strcmp(line, "TCAL") == 0) { touchCalibrate(); enterDash(); return; }
+  if (strcmp(line, "TCAL") == 0) { touchCalibrate(); redrawScreen(); return; }
   if (strncmp(line, "TRAW:", 5) == 0) { touchDiag(constrain(atoi(line + 5), 1, 100)); return; }
   if (strncmp(line, "TOUCH:", 6) == 0) {                                 // test: a tap at x,y
     unsigned x = 0, y = 0;
@@ -2104,6 +2455,7 @@ static void handleLine(char *line) {
       drawIdleScreen();
     }
     pcShownAlive = true;
+    if (uiLang) { lblArrived = true; lblArrivedMs = millis(); }   // redraw: ask the PC for the labels
     Serial.println(F("[esp] cleared"));
     return;
   }
@@ -2290,7 +2642,13 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   mood = MOOD_SLEEPY;                          // the chat face, for when chat is opened
+  for (size_t sz : {65536u, 49152u, 32768u}) {  // screen-text bitmaps for Kannada / Hindi
+    lblPool = (uint8_t *)malloc(sz);
+    if (lblPool) { lblPoolSize = sz; break; }
+  }
   touchBegin();
+  uiLang = prefs.getUChar("lang", 0);
+  if (uiLang > 2) uiLang = 0;
   // Holding the button while the board starts (1.5 s) calibrates the touch screen.
   if (digitalRead(BTN_TALK) == LOW) {
     const uint32_t t0 = millis();
@@ -2301,8 +2659,7 @@ void setup() {
       btnArmed = true;
     }
   }
-  ui = UI_DASH;                                // boot into the farm dashboard
-  dashDrawFrame();
+  enterLang();                                 // ask for the language first, then the dashboard
 
   const bool ampOk = ampBegin();
   const bool micOk = micBegin();
@@ -2323,7 +2680,7 @@ void setup() {
                 BTN_TALK, REC_MIN_MS, BTN_DEBOUNCE_MS);
   Serial.printf("[esp] touch XPT2046 CS=%d (IRQ unused): %s\n", TOUCH_CS,
                 touchReady ? "calibrated" : "NOT calibrated - press the screen firmly to start calibration");
-  Serial.println(F("[esp] screen: dashboard"));
+  Serial.printf("[esp] screen text pool %u bytes, language %s (asking)\n", (unsigned)lblPoolSize, LANG_CODE[uiLang]);
   rfidBegin(onRfidCardDetected);
   Serial.println(F("[esp] ready"));
 }
@@ -2415,6 +2772,7 @@ void loop() {
   // --- PC link indicator -----------------------------------------------------
   if (state == ST_IDLE && !aud.active && pcAlive() != pcShownAlive) {
     pcShownAlive = pcAlive();
+    if (pcShownAlive && uiLang) { lblArrived = true; lblArrivedMs = millis(); }   // fetch labels now
     if (ui == UI_CHAT) {
       drawTitleBar(pcShownAlive ? "ready" : "PC offline");
       if (!pcShownAlive) {
@@ -2432,6 +2790,19 @@ void loop() {
 
   // --- dashboard: age counter and link state, once a second -----------------
   if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashTick();
+
+  // --- language screen countdown; redraw once new screen text has arrived ---
+  if (ui == UI_LANG && state == ST_IDLE && !aud.active) langTick();
+  if ((lblArrived || lblFieldsDirty) && millis() - lblArrivedMs > 350 && state == ST_IDLE && !aud.active && !qrShown) {
+    if (lblArrived) {
+      redrawScreen();
+    } else if (ui == UI_DASH) {
+      for (int i = 0; i < F_COUNT; i++) if (lblFieldsDirty & (1u << i)) dfields[i].drawn = false;
+      dashUpdate();
+    }
+    lblArrived = false;
+    lblFieldsDirty = 0;
+  }
 
   // --- touch screen and the fertilizer screens (never during audio) ----------
   if (state == ST_IDLE && !aud.active && !qrShown) {

@@ -152,3 +152,34 @@ def render_answer(answer: str, question_rows: int) -> tuple[list[list[bytes]], i
         img = np.vstack([img, np.zeros((page_h - img.shape[0], TEXT_W), dtype=np.uint8)])
         pages.append(to_rows(img))
     return pages, page_h
+
+
+# --- screen labels (any kiosk text in Kannada / Hindi) ------------------------
+
+# Pixel size per TFT font the firmware would have used: GLCD (1), font 2, font 4.
+LABEL_PX = {1: 13, 2: 16, 4: 22}
+
+
+def render_label(text: str, font: int, max_w: int, max_lines: int = 1) -> tuple[list[bytes], int, int]:
+    """(rows, width, height) of `text` fitted into max_w x max_lines lines:
+    wrapped, then shrunk down to 12 px, then cut with '...'. Width is the widest
+    line actually drawn, so the firmware can align it (centre, right...)."""
+    max_w = max(16, min(int(max_w or 300), 312))
+    max_lines = max(1, min(int(max_lines or 1), 8))
+    text = " ".join((text or "").split())
+    px = LABEL_PX.get(int(font), 16)
+    while True:
+        r = Renderer(px)
+        lines = r.wrap(text, max_w)
+        if len(lines) <= max_lines or px <= 12:
+            break
+        px -= 1
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and r.width(last + "...") > max_w:
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "..."
+    width = max(1, min(max_w, int(max(r.width(l) for l in lines) + 1.5))) if lines else 1
+    img = np.vstack([r.render_line(l, width) for l in lines]) if lines else np.zeros((1, width), np.uint8)
+    return to_rows(img), width, img.shape[0]

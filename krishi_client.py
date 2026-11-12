@@ -556,6 +556,10 @@ class Esp32Link:
             deadline = time.time() + 2.5
             while time.time() < deadline:
                 if self._readline() == "PONG":
+                    # the kiosk follows PONG with its screen language (LANG:en|kn|hi)
+                    line = self._read_line(0.5) or ""
+                    if line.startswith("LANG:"):
+                        set_screen_lang(line[5:])
                     return True
             time.sleep(2.0)         # maybe it was booting
         return False
@@ -821,11 +825,17 @@ def handle_question(server, question, session, esp, play, pc_audio, heard=None):
     q = heard if heard and "english" in heard else understand(server, question)
     lang, english = q.get("language", "en"), q.get("english") or question
     style = q.get("style", "mixed")      # Kanglish/Hinglish, or plain Kannada/Hindi
+    asked_in = lang
+    if esp:
+        # The farmer chose the screen language at the kiosk: answer in it. Asked
+        # in that same language keeps their style (Kanglish...), else plain.
+        lang = SCREEN_LANG["lang"]
+        style = style if asked_in == lang else "native"
     print(f"\n  you    > {question}")
     if lang != "en" or english != question:
         print(f"           ({lang}) {english}")
     if esp:
-        if lang != "en":
+        if asked_in != "en":
             send_indic_text(esp, question)            # the question in its own script
         esp.question(q.get("display") or question)   # shown now, while Gemma works
     t0 = time.time()
@@ -906,6 +916,100 @@ def answer_kiosk_recording(server, esp, raw, kiosk_bytes, kiosk_ms, args):
         return
     print(f"heard: {heard['text']!r}")
     handle_question(server, heard["text"], args.session, esp, not args.no_audio, args.pc_audio, heard)
+
+
+SCREEN_LANG = {"lang": "en"}          # chosen on the kiosk's language screen (LANG: lines)
+
+
+def set_screen_lang(code):
+    code = (code or "").strip()
+    if code in ("en", "kn", "hi") and code != SCREEN_LANG["lang"]:
+        SCREEN_LANG["lang"] = code
+        print(f"  kiosk screen language: {code}")
+
+
+class LabelWorker:
+    """Screen text in Kannada / Hindi for the kiosk.
+
+    The kiosk sends TRQ:<key>|<lang>|<font>|<maxW>|<lines>|<English text> for
+    each text it needs. This thread batches them, has the server translate them
+    (POST /api/krishi/translate), renders each in its script (kiosk_text) to fit
+    maxW x lines, and queues "LB:<key>|<w>,<h>" + "LR:<hex>" lines. The serial
+    loop sends the queue with take() only between recordings and answers."""
+
+    def __init__(self, server):
+        self.server = server
+        self._q = []
+        self._out = []
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._rendered = {}                   # (lang, font, maxw, lines, text) -> (w, h, rows)
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def request(self, line):
+        parts = line[4:].split("|", 5)
+        if len(parts) != 6:
+            return
+        key, lang, font, maxw, lines, text = parts
+        try:
+            req = (key, lang, int(font), int(maxw), int(lines), text)
+        except ValueError:
+            return
+        with self._lock:
+            self._q.append(req)
+        self._wake.set()
+
+    def take(self, max_bytes=6000):
+        """Queued lines, up to about max_bytes per call so the loop stays responsive."""
+        out, size = [], 0
+        with self._lock:
+            while self._out and size < max_bytes:
+                block = self._out.pop(0)
+                out += block
+                size += sum(len(x) + 1 for x in block)
+        return out
+
+    def _run(self):
+        import httpx
+        import kiosk_text
+        while True:
+            self._wake.wait()
+            time.sleep(0.12)                  # gather a screenful of requests
+            self._wake.clear()
+            with self._lock:
+                batch, self._q = self._q, []
+            by_lang = {}
+            for req in batch:
+                by_lang.setdefault(req[1], []).append(req)
+            for lang, reqs in by_lang.items():
+                todo = [r for r in reqs if (lang, r[2], r[3], r[4], r[5]) not in self._rendered]
+                texts = list(dict.fromkeys(r[5] for r in todo))
+                translated = {}
+                for i in range(0, len(texts), 50):
+                    chunk = texts[i:i + 50]
+                    try:
+                        resp = httpx.post(f"{self.server}/api/krishi/translate",
+                                          json={"lang": lang, "texts": chunk}, timeout=60)
+                        resp.raise_for_status()
+                        translated.update(zip(chunk, resp.json()["translations"]))
+                    except Exception as exc:
+                        print(f"  screen text: translation failed ({exc}); the kiosk keeps English")
+                for key, _, font, maxw, lines, text in reqs:
+                    ck = (lang, font, maxw, lines, text)
+                    if ck not in self._rendered:
+                        native = translated.get(text)
+                        if not native:
+                            continue
+                        try:
+                            rows, w, h = kiosk_text.render_label(native, font, maxw or 300, lines)
+                        except Exception as exc:
+                            print(f"  screen text: render failed for {text!r}: {exc}")
+                            continue
+                        self._rendered[ck] = (w, h, rows)
+                    w, h, rows = self._rendered[ck]
+                    block = [f"LB:{key}|{w},{h}"] + ["LR:" + r.rstrip(b"\x00").hex() for r in rows]
+                    with self._lock:
+                        self._out.append(block)
 
 
 class DashboardPoller:
@@ -1029,6 +1133,7 @@ def run_button_mode(server, esp, args):
     esp.status("ready")
     esp.heartbeat()
     dash = DashboardPoller(server)
+    labels = LabelWorker(server)
     rec, rec_last, last_hb = None, 0.0, time.time()
     try:
         while True:
@@ -1043,6 +1148,14 @@ def run_button_mode(server, esp, args):
                 line = dash.take_line()
                 if line:
                     esp.dashboard(line)
+                # Kannada / Hindi screen text, paced like the answer bitmaps.
+                out = labels.take()
+                if out:
+                    data = ("\n".join(out) + "\n").encode("ascii")
+                    for i in range(0, len(data), 1024):
+                        esp.ser.write(data[i:i + 1024])
+                        esp.ser.flush()
+                        time.sleep(0.012)
 
             ev = esp.next_event(0.2)
             if ev is None:
@@ -1090,6 +1203,10 @@ def run_button_mode(server, esp, args):
                 rec = None
             elif line.startswith("[esp] screen"):
                 print(f"  kiosk: {line[6:]}")
+            elif line.startswith("TRQ:"):
+                labels.request(line)
+            elif line.startswith("LANG:"):
+                set_screen_lang(line[5:])
             elif line == "CROPS?":
                 kiosk_crops(server, esp)
             elif line.startswith("FERT:"):

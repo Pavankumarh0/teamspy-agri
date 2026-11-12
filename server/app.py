@@ -35,7 +35,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import fertilizer, language, llm, sensors, speech
+import fertilizer, language, llm, sensors, speech, ui_i18n
 from grounding import grounded_sources
 from prompts import PROMPT
 from rag import Retriever
@@ -402,6 +402,17 @@ class FertilizerRequest(BaseModel):
 def default_region() -> str:
     r = os.getenv("KRISHI_REGION", fertilizer.DEFAULT_REGION).strip().lower()
     return r if r in fertilizer.REGIONS else fertilizer.DEFAULT_REGION
+
+
+class TranslateRequest(BaseModel):
+    lang: Literal["en", "kn", "hi"]
+    texts: list[Annotated[str, Field(max_length=400)]] = Field(max_length=60)
+
+
+@api.post("/translate")
+async def translate_ui(body: TranslateRequest):
+    """Kiosk screen text in Kannada / Hindi (ui_i18n: overrides, cache, Sarvam)."""
+    return {"lang": body.lang, "translations": await ui_i18n.translate(body.texts, body.lang)}
 
 
 @api.get("/fertilizer/crops")

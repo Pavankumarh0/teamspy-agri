@@ -259,6 +259,40 @@ The physical button still works everywhere: tap returns to the dashboard, hold a
 
 API: `GET /api/krishi/fertilizer/crops`; `POST /api/krishi/fertilizer {"crop","area_acres","n","p","k"}` returns the doses, products, stages, field conditions, sources and the screen pages.
 
+## Screen language (English / Kannada / Hindi)
+
+**At power-on the kiosk asks for the language.**
+- Touch **English**, **ಕನ್ನಡ** or **हिंदी**. The push button moves the highlight, and after 20 s the highlighted one (the last choice, remembered) is taken.
+- Change it later with **Language** at the bottom right of the dashboard.
+
+**Everything on the screen then appears in that language:** dashboard, crop and fertilizer screens, chat statuses and bubbles. Voice answers also come in the screen language (Kanglish/Hinglish style if the question was asked that way).
+
+**How it works:** the TFT fonts are ASCII only, so:
+1. **Asking.** In Kannada or Hindi, the firmware's `uiDraw()` / `uiWrap()` asks the PC for each text the first time it is needed (`TRQ:`).
+2. **Translating.** `krishi_client.py` (LabelWorker) has the server translate it (`POST /api/krishi/translate`, `server/ui_i18n.py`):
+   - Numbers become placeholders, so "Urea {0} kg" is translated once for every value.
+   - Hand-checked wording in **`server/ui_overrides.json`** wins.
+   - Everything else is Sarvam machine translation, cached in `server/data/ui_translations.json`.
+3. **Drawing.** The PC renders the text with HarfBuzz and the Nirmala UI font (`kiosk_text.render_label`) and sends a bitmap (`LB:`/`LR:`).
+4. **Showing.** The kiosk keeps up to 64 KB of these. English shows until a label arrives. Fixed text triggers one redraw; a changing dashboard value repaints only its field.
+
+The language screen's own words are built into the firmware (`firmware/include/lang_names.h`, from `scripts/make_lang_header.py`), so they show before the PC app is connected.
+
+**Correcting a translation:** add or edit the English → Kannada/Hindi pair in `server/ui_overrides.json` (use `{0}` for numbers), then restart the server. Alternatively, delete the entry in `server/data/ui_translations.json` to have it re-translated. Machine translation gets short phrases mostly right, but not always: "When to apply" first came back as "when to submit an application" and is now overridden. **Have a Kannada and a Hindi speaker read through the screens.**
+
+## Why a fertilizer is recommended
+
+The result has 5 pages: totals → **Why these fertilizers** → when to apply → why this amount → field now.
+
+**Why these fertilizers:**
+- **Urea** gives nitrogen (46 % N), for leaf and stem growth. It is split because nitrogen is easily lost.
+- **DAP** gives phosphorus (46 % P₂O₅) and some N (18 %), for roots and flowering, so all of it goes in at the start.
+- **MOP** gives potassium (60 % K₂O), for fruit size and quality, water use and stress resistance.
+
+These are the nutrient roles in `kb/03_fertilizers_and_nutrients.md`, and a test checks the wording matches.
+
+**Why this amount:** names whether each nutrient's rating came from the soil card or the district survey, and the resulting ±25 %.
+
 ## Languages, loudness, knowledge base
 
 - **Languages:** English, Kannada and Hindi (`KIOSK_LANGUAGES=en,kn,hi`). Kanglish and Hinglish questions get Kanglish/Hinglish answers, and pure Kannada/Hindi get pure answers, as in Campus Mithra. The TFT shows Latin script.
