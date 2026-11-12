@@ -1,0 +1,17 @@
+# Smart Krishi server (same stack as Campus Mithra's server/)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9   # required by the audio upload endpoints
+python-dotenv>=1.0
+httpx>=0.27
+numpy>=1.26
+scikit-learn>=1.4
+edge-tts>=6.1
+av>=12.0                  # PyAV: decodes edge-tts mp3 into 16-bit PCM for the MAX98357A
+# Offline speech-to-text, only needed with STT_PROVIDER=whisper:
+#   pip install faster-whisper
+
+# krishi_client.py only (USB link to the ESP32 kiosk, PC-mic fallback)
+pyserial>=3.5
+PyAudio>=0.2.14
+scipy>=1.11

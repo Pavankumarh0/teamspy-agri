@@ -1,0 +1,7 @@
+{
+  "name": "Smart Krishi",
+  "short": "Smart Krishi",
+  "status": "Starter knowledge base for development. Review every file against the official package of practices (state agricultural university / KVK) before field use.",
+  "greeting": "Namaskara! I am Smart Krishi, your farming assistant. Ask me about crops, soil health, watering, fertilizers and plant problems.",
+  "stt_hint": "Smart Krishi, tomato, fertilizer, fertiliser, manure, compost, vermicompost, farmyard manure, urea, DAP, potash, nitrogen, phosphorus, potassium, calcium, magnesium, soil health card, soil test, soil moisture, irrigation, drip irrigation, mulching, green manure, biofertilizer, Azospirillum, Azotobacter, Rhizobium, neem cake, early blight, leaf curl, whitefly, wilt, blossom end rot, Krishi Vigyan Kendra, Raitha Samparka Kendra"
+}
