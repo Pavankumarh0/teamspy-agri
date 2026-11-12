@@ -280,6 +280,21 @@ The language screen's own words are built into the firmware (`firmware/include/l
 
 **Correcting a translation:** add or edit the English → Kannada/Hindi pair in `server/ui_overrides.json` (use `{0}` for numbers), then restart the server. Alternatively, delete the entry in `server/data/ui_translations.json` to have it re-translated. Machine translation gets short phrases mostly right, but not always: "When to apply" first came back as "when to submit an application" and is now overridden. **Have a Kannada and a Hindi speaker read through the screens.**
 
+## Knowledge base additions (women farmers, schemes, pests, potato, coffee)
+
+| File | Contents |
+|---|---|
+| `kb/10_women_farmers.md` | women decide on their farm, same advice for all; the 30 % rule for women farmers in agriculture schemes; MKSP; equal property rights (2005 amendment); KVK training |
+| `kb/11_government_schemes.md` | PM-KISAN (₹6000/yr in 3 instalments, PIB); crop insurance PMFBY, Soil Health Card, drip/sprinkler support (no unverified amounts); where to ask; market prices are not covered |
+| `kb/12_pest_management.md` | integrated pest management, traps; pink bollworm, fall armyworm, aphids, potato late blight, rice stem borer. Practices only: no pesticide names or doses |
+| `kb/09_recommended_fertilizer_doses.md` | + potato (UAS Bangalore, Hassan: 25 t FYM + 75:75:100 kg NPK/ha), + coffee split timing and the 40:30:40 per-split limit |
+
+- **Potato** is the 6th crop on the fertilizer screen.
+- **Coffee is not a fertilizer-screen crop.** The Coffee Board / CCRI dose table could not be retrieved and verified, so no coffee doses are given.
+- **Real farmer questions:** put a free data.gov.in key in `.env` (`DATA_GOV_IN_API_KEY`), then run:
+  1. `python evaletch_kcc.py <KCC resource id>`
+  2. `python evalun_eval.py --queries eval\queries_kcc.json --fresh`
+
 ## Weather and rain alert
 
 **Source:** OpenWeatherMap, using `WEATHER_API_KEY` in `.env`.

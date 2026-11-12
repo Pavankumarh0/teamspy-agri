@@ -9,3 +9,4 @@ firmware/.pio/
 .vscode/
 eval/partial.json
 eval/run.log
+eval/server.log

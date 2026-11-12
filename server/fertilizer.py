@@ -99,7 +99,18 @@ CROPS: dict[str, Crop] = {
         [Stage("At planting (basal)", 0.5, 1, 1), Stage("30 days after planting", 0.5, 0, 0)],
         [("Farmyard manure (FYM), before planting", 25, "t"), ("Zinc sulphate, at last ploughing", 50, "kg")],
         "TNAU Agritech - Bellary onion", "https://agritech.tnau.ac.in/horticulture/horti_vegetables_bellaryonion.html"),
+    "potato": Crop(
+        "Potato", "Karnataka, Hassan trials", (75, 75, 100),
+        # Recommended dose of nutrients "25 t FYM ha-1 + 75:75:100 kg of NPK ha-1"
+        # (Mysore J. Agric. Sci., UAS Bangalore, 2020, Hassan). N in two splits
+        # (ICAR-CPRI's existing recommendation); P and K at planting.
+        [Stage("At planting (basal)", 0.5, 1, 1), Stage("At earthing up", 0.5, 0, 0)],
+        [("Farmyard manure (FYM), before planting", 25, "t")],
+        "UAS Bangalore (Mysore J. Agric. Sci. 2020)",
+        "https://mail.uasbangalore.edu.in/images/2020-3rd-Issue/8.pdf"),
 }
+# Coffee is deliberately absent: the Coffee Board / CCRI dose table could not be
+# retrieved and verified; the knowledge base gives its split timing and limits.
 
 AREAS = [0.25, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 10]       # acres the touch screen offers
 

@@ -148,7 +148,14 @@ def context_precision(useful: list) -> float | None:
 
 
 async def main():
-    data = json.loads((ROOT / "eval" / "queries.json").read_text(encoding="utf-8"))
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--queries", default=str(ROOT / "eval" / "queries.json"))
+    ap.add_argument("--fresh", action="store_true", help="ignore eval/partial.json and start again")
+    args = ap.parse_args()
+    if args.fresh and CHECKPOINT.exists():
+        CHECKPOINT.unlink()
+    data = json.loads(Path(args.queries).read_text(encoding="utf-8"))
     done = json.loads(CHECKPOINT.read_text(encoding="utf-8")) if CHECKPOINT.exists() else {"queries": [], "red_team": []}
     results = done["queries"]
     for i, item in enumerate(data["queries"]):
