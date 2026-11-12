@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 990" width="1400" height="990" font-family="'Segoe UI', -apple-system, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <title>Chiguru · Smart Krishi system architecture</title>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f4a33"/>
+    </marker>
+    <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3c6e9c"/>
+    </marker>
+    <style>
+      .t  { font-size: 15px; font-weight: 700; fill: #1d2a1f; }
+      .s  { font-size: 12.5px; fill: #55604f; }
+      .zl { font-size: 11.5px; font-weight: 700; letter-spacing: 1.6px; fill: #6a7563; }
+      .al { font-size: 12px; fill: #2f4a33; font-weight: 600; }
+      .alc{ font-size: 12px; fill: #3c6e9c; font-weight: 600; }
+      .n  { font-size: 12px; font-weight: 700; fill: #ffffff; }
+      .card { fill: #ffffff; stroke: #cfd8c6; stroke-width: 1.2; }
+      .step { fill: #ffffff; stroke: #c9d6c0; stroke-width: 1.2; }
+      .flow { stroke: #2f4a33; stroke-width: 2; fill: none; }
+      .api  { stroke: #3c6e9c; stroke-width: 1.6; fill: none; stroke-dasharray: 6 5; }
+    </style>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0" y="0" width="1400" height="990" rx="22" fill="#fbf8f1"/>
+
+  <text x="40" y="50" font-size="24" font-weight="800" fill="#1d2a1f">Chiguru · Smart Krishi — system architecture</text>
+  <text x="40" y="76" font-size="14" fill="#55604f">A farmer holds the button and asks in Kannada, Hindi or English. The answer comes back spoken and on screen, grounded in a farming knowledge base.</text>
+
+  <!-- zones -->
+  <rect x="24" y="96" width="320" height="690" rx="16" fill="#edf4e8" stroke="#d5e3cc"/>
+  <text x="44" y="122" class="zl">ON THE FARM</text>
+  <rect x="364" y="96" width="716" height="690" rx="16" fill="#f4efe4" stroke="#e3dac7"/>
+  <text x="384" y="122" class="zl">PC · EDGE SERVER (PYTHON)</text>
+  <rect x="1100" y="96" width="276" height="690" rx="16" fill="#eaf1f7" stroke="#d3e0ec"/>
+  <text x="1120" y="122" class="zl">CLOUD APIs</text>
+
+  <!-- A1: sensor node -->
+  <rect x="44" y="140" width="280" height="150" rx="12" class="card"/>
+  <text x="62" y="168" class="t">Sensor node</text>
+  <text x="62" y="190" class="s">Arduino UNO Q</text>
+  <circle cx="68" cy="219" r="3" fill="#2f6b3a"/>
+  <text x="78" y="223" class="s">DHT11 · air temperature + humidity</text>
+  <circle cx="68" cy="243" r="3" fill="#2f6b3a"/>
+  <text x="78" y="247" class="s">Soil moisture probe (LM393 module)</text>
+  <circle cx="68" cy="267" r="3" fill="#2f6b3a"/>
+  <text x="78" y="271" class="s">Reports one reading per device</text>
+
+  <!-- A2: voice kiosk -->
+  <rect x="44" y="330" width="280" height="436" rx="12" class="card"/>
+  <text x="62" y="358" class="t">Voice kiosk</text>
+  <text x="62" y="380" class="s">ESP32 DevKit · firmware/ (PlatformIO)</text>
+
+  <rect x="62" y="400" width="244" height="56" rx="9" fill="#f6faf3" stroke="#d5e3cc"/>
+  <text x="76" y="424" font-size="13.5" font-weight="700" fill="#1d2a1f">Talk button</text>
+  <text x="76" y="444" class="s">GPIO27 · hold to talk, release to send</text>
+
+  <rect x="62" y="468" width="244" height="56" rx="9" fill="#f6faf3" stroke="#d5e3cc"/>
+  <text x="76" y="492" font-size="13.5" font-weight="700" fill="#1d2a1f">INMP441 microphone</text>
+  <text x="76" y="512" class="s">I2S0 · 16 kHz, 16-bit PCM</text>
+
+  <rect x="62" y="536" width="244" height="56" rx="9" fill="#f6faf3" stroke="#d5e3cc"/>
+  <text x="76" y="560" font-size="13.5" font-weight="700" fill="#1d2a1f">MAX98357A amp + speaker</text>
+  <text x="76" y="580" class="s">I2S1 · 32 KB credit-fed buffer</text>
+
+  <rect x="62" y="604" width="244" height="56" rx="9" fill="#f6faf3" stroke="#d5e3cc"/>
+  <text x="76" y="628" font-size="13.5" font-weight="700" fill="#1d2a1f">ILI9341 TFT 320×240</text>
+  <text x="76" y="648" class="s">SPI · question, answer, source</text>
+
+  <text x="62" y="694" class="s" font-weight="600" fill="#2f6b3a">ready → LISTENING → PROCESSING</text>
+  <text x="62" y="714" class="s" font-weight="600" fill="#2f6b3a">→ SPEAKING</text>
+  <text x="62" y="744" class="s">Shows "PC offline" if heartbeats stop.</text>
+
+  <!-- B1: knowledge base -->
+  <rect x="400" y="420" width="220" height="116" rx="12" class="card"/>
+  <text x="416" y="448" class="t">Knowledge base</text>
+  <text x="416" y="472" class="s">kb/*.md · 8 farming topics</text>
+  <text x="416" y="494" class="s">each ## section = 1 chunk</text>
+  <text x="416" y="516" class="s">pending agronomist review</text>
+
+  <!-- B2: PC bridge -->
+  <rect x="400" y="580" width="220" height="140" rx="12" class="card"/>
+  <text x="416" y="608" class="t">krishi_client.py</text>
+  <text x="416" y="630" class="s">PC ⇄ kiosk bridge</text>
+  <text x="416" y="656" class="s">streams the mic audio up</text>
+  <text x="416" y="678" class="s">sends Q, A, source to the TFT</text>
+  <text x="416" y="700" class="s">feeds speech back on credit</text>
+
+  <!-- C: server -->
+  <rect x="700" y="136" width="360" height="630" rx="14" fill="#ffffff" stroke="#b9c9ae" stroke-width="1.6"/>
+  <text x="716" y="164" class="t">FastAPI server · port 8001</text>
+  <text x="716" y="186" class="s">server/app.py · /api/krishi/*</text>
+
+  <!-- s0 soil -->
+  <rect x="716" y="206" width="328" height="64" rx="9" fill="#fbf6e9" stroke="#e2cf9d" stroke-dasharray="5 4"/>
+  <text x="732" y="228" font-size="13.5" font-weight="700" fill="#1d2a1f">Soil reading · soil.py</text>
+  <text x="732" y="246" class="s">joins the context for soil questions,</text>
+  <text x="732" y="262" class="s">labelled REAL, MOCK or STALE</text>
+
+  <!-- s1..s6 -->
+  <g>
+    <rect x="716" y="286" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="318" r="12" fill="#2f6b3a"/><text x="740" y="322" text-anchor="middle" class="n">1</text>
+    <text x="762" y="313" font-size="13.5" font-weight="700" fill="#1d2a1f">Speech-to-text · speech.py</text>
+    <text x="762" y="333" class="s">Sarvam saaras:v4 (or offline Whisper)</text>
+
+    <rect x="716" y="366" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="398" r="12" fill="#2f6b3a"/><text x="740" y="402" text-anchor="middle" class="n">2</text>
+    <text x="762" y="393" font-size="13.5" font-weight="700" fill="#1d2a1f">Understand · language.py</text>
+    <text x="762" y="413" class="s">Kannada · Hindi · English → English</text>
+
+    <rect x="716" y="446" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="478" r="12" fill="#2f6b3a"/><text x="740" y="482" text-anchor="middle" class="n">3</text>
+    <text x="762" y="473" font-size="13.5" font-weight="700" fill="#1d2a1f">Retrieve · rag.py</text>
+    <text x="762" y="493" class="s">Gemini embeddings + TF-IDF, cached</text>
+
+    <rect x="716" y="526" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="558" r="12" fill="#2f6b3a"/><text x="740" y="562" text-anchor="middle" class="n">4</text>
+    <text x="762" y="553" font-size="13.5" font-weight="700" fill="#1d2a1f">Answer · llm.py + prompts.py</text>
+    <text x="762" y="573" class="s">Gemma 4 · context only, no invented doses</text>
+
+    <rect x="716" y="606" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="638" r="12" fill="#2f6b3a"/><text x="740" y="642" text-anchor="middle" class="n">5</text>
+    <text x="762" y="633" font-size="13.5" font-weight="700" fill="#1d2a1f">Ground-check · grounding.py</text>
+    <text x="762" y="653" class="s">every sentence &amp; number must be in the KB</text>
+
+    <rect x="716" y="686" width="328" height="64" rx="9" class="step"/>
+    <circle cx="740" cy="718" r="12" fill="#2f6b3a"/><text x="740" y="722" text-anchor="middle" class="n">6</text>
+    <text x="762" y="713" font-size="13.5" font-weight="700" fill="#1d2a1f">Localize + speak</text>
+    <text x="762" y="733" class="s">back to Kannada · edge-tts → 16 kHz PCM</text>
+  </g>
+
+  <!-- in-server flow -->
+  <line x1="880" y1="351" x2="880" y2="364" class="flow" marker-end="url(#ah)"/>
+  <line x1="880" y1="431" x2="880" y2="444" class="flow" marker-end="url(#ah)"/>
+  <line x1="880" y1="511" x2="880" y2="524" class="flow" marker-end="url(#ah)"/>
+  <line x1="880" y1="591" x2="880" y2="604" class="flow" marker-end="url(#ah)"/>
+  <line x1="880" y1="671" x2="880" y2="684" class="flow" marker-end="url(#ah)"/>
+
+  <!-- D: cloud services -->
+  <rect x="1120" y="286" width="236" height="144" rx="12" class="card"/>
+  <text x="1136" y="314" class="t">Sarvam AI</text>
+  <text x="1136" y="340" class="s">speech-to-text · saaras:v4</text>
+  <text x="1136" y="362" class="s">Kannada ⇄ English translation</text>
+  <text x="1136" y="384" class="s">auto language detection</text>
+
+  <rect x="1120" y="446" width="236" height="144" rx="12" class="card"/>
+  <text x="1136" y="474" class="t">Google AI Studio</text>
+  <text x="1136" y="500" class="s">Gemma 4 (gemma-4-26b-a4b-it)</text>
+  <text x="1136" y="522" class="s">gemini-embedding-001</text>
+  <text x="1136" y="544" class="s">or local Ollama · gemma3:4b</text>
+
+  <rect x="1120" y="686" width="236" height="64" rx="12" class="card"/>
+  <text x="1136" y="712" class="t">Microsoft edge-tts</text>
+  <text x="1136" y="734" class="s">neural voices · en / kn / hi</text>
+
+  <!-- server -> cloud (dashed) -->
+  <line x1="1044" y1="318" x2="1118" y2="318" class="api" marker-end="url(#ahc)"/>
+  <line x1="1044" y1="398" x2="1118" y2="398" class="api" marker-end="url(#ahc)"/>
+  <line x1="1044" y1="478" x2="1118" y2="478" class="api" marker-end="url(#ahc)"/>
+  <line x1="1044" y1="558" x2="1118" y2="558" class="api" marker-end="url(#ahc)"/>
+  <line x1="1044" y1="718" x2="1118" y2="718" class="api" marker-end="url(#ahc)"/>
+
+  <!-- sensor node -> soil.py -->
+  <line x1="324" y1="238" x2="714" y2="238" class="flow" marker-end="url(#ah)"/>
+  <text x="522" y="228" text-anchor="middle" class="al">HTTP POST /api/krishi/soil-data</text>
+  <text x="522" y="256" text-anchor="middle" class="s">JSON · optional X-Device-Key</text>
+
+  <!-- KB -> retrieve -->
+  <line x1="620" y1="478" x2="714" y2="478" class="flow" marker-end="url(#ah)"/>
+  <text x="660" y="468" text-anchor="middle" class="al">chunks</text>
+
+  <!-- kiosk <-> client -->
+  <line x1="326" y1="650" x2="398" y2="650" class="flow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text x="362" y="640" text-anchor="middle" class="al">USB serial</text>
+  <text x="362" y="668" text-anchor="middle" class="s">921600 Bd</text>
+
+  <!-- client <-> server -->
+  <line x1="622" y1="650" x2="698" y2="650" class="flow" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text x="660" y="640" text-anchor="middle" class="al">HTTP</text>
+  <text x="660" y="668" text-anchor="middle" class="s">JSON + PCM</text>
+
+  <!-- landing page band -->
+  <rect x="24" y="806" width="1352" height="122" rx="16" fill="#1f3326"/>
+  <text x="48" y="840" font-size="16" font-weight="800" fill="#f3e7c4">Chiguru landing page · the public face</text>
+  <text x="48" y="866" font-size="13" fill="#d9e4d2">React 19 · TypeScript · Vite · Three.js · React Three Fiber · drei · postprocessing · GSAP · Lenis</text>
+  <text x="48" y="890" font-size="13" fill="#d9e4d2">A scroll-driven 3D farm that introduces the device to farmers, FPOs and partners, with multilingual copy in Kannada, Hindi, Telugu, Tamil and Bengali.</text>
+  <text x="48" y="912" font-size="13" fill="#a9bba2">Static site (src/, public/): it does not call the kiosk server.</text>
+
+  <!-- legend -->
+  <line x1="40" y1="958" x2="84" y2="958" class="flow" marker-end="url(#ah)"/>
+  <text x="94" y="962" class="s">data flow</text>
+  <line x1="190" y1="958" x2="234" y2="958" class="api" marker-end="url(#ahc)"/>
+  <text x="244" y="962" class="s">external API call</text>
+  <rect x="380" y="949" width="34" height="18" rx="4" fill="#fbf6e9" stroke="#e2cf9d" stroke-dasharray="4 3"/>
+  <text x="424" y="962" class="s">side input (sensor reading added to the context)</text>
+</svg>
