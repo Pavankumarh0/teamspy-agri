@@ -717,7 +717,7 @@ def deliver(result, server, esp=None, play=True, pc_audio=False, question_text=N
     elif not result.get("in_scope"):
         print("           referred: (nothing in the knowledge base)")
     if esp:
-        esp.source(", ".join(sources))     # before the answer, so it draws once
+        esp.source("")     # no "from <file>" line under the answer (sources stay in this console log)
         if result.get("language", "en") != "en":
             # in Kannada/Hindi script; A: below still carries the Latin copy as a fallback
             send_indic_text(esp, question_text or result.get("question", ""), answer)

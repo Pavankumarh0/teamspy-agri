@@ -134,7 +134,7 @@ def pack(q, a, in_scope, sources=(), via="gemma", sensor=None):
     """Bundle a reply; the spoken version names its source at the end."""
     sources = list(sources)
     speak = a
-    if sources and os.getenv("SPEAK_SOURCES", "1") == "1":
+    if sources and os.getenv("SPEAK_SOURCES", "0") == "1":
         speak += " This is from the " + " and ".join(spoken_source(s) for s in sources[:2]) + " information."
     aid = remember_audio(speak)
     return {"question": q, "answer": a, "in_scope": in_scope, "sources": sources, "via": via,
@@ -257,7 +257,7 @@ async def localize(r: dict, lang: str, style: str = "mixed") -> dict:
         return r
     r.update(language=lang, answer=native, answer_display=roman)
     if r.get("audio_id") in AUDIO:
-        suffix = language.spoken_suffix(lang, r["sources"]) if os.getenv("SPEAK_SOURCES", "1") == "1" else ""
+        suffix = language.spoken_suffix(lang, r["sources"]) if os.getenv("SPEAK_SOURCES", "0") == "1" else ""
         AUDIO[r["audio_id"]] = {"text": native + suffix, "voice": language.voice(lang)}
     return r
 
