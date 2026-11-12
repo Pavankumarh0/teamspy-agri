@@ -265,7 +265,7 @@ API: `GET /api/krishi/fertilizer/crops`; `POST /api/krishi/fertilizer {"crop","a
 - Touch **English**, **ಕನ್ನಡ** or **हिंदी**. The push button moves the highlight, and after 20 s the highlighted one (the last choice, remembered) is taken.
 - Change it later with **Language** at the bottom right of the dashboard.
 
-**Everything on the screen then appears in that language:** dashboard, crop and fertilizer screens, chat statuses and bubbles. Voice answers also come in the screen language (Kanglish/Hinglish style if the question was asked that way).
+**Everything on the screen then appears in that language:** dashboard, crop and fertilizer screens, chat statuses and bubbles. **Answers come in the language the question was asked in**, whatever the screen language: ask in English and the answer is English; ask in Kannada or Kanglish and it is Kannada (Kanglish style stays mixed); the same for Hindi and Hinglish.
 
 **How it works:** the TFT fonts are ASCII only, so:
 1. **Asking.** In Kannada or Hindi, the firmware's `uiDraw()` / `uiWrap()` asks the PC for each text the first time it is needed (`TRQ:`).

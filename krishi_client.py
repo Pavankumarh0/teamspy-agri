@@ -836,11 +836,9 @@ def handle_question(server, question, session, esp, play, pc_audio, heard=None):
     lang, english = q.get("language", "en"), q.get("english") or question
     style = q.get("style", "mixed")      # Kanglish/Hinglish, or plain Kannada/Hindi
     asked_in = lang
-    if esp:
-        # The farmer chose the screen language at the kiosk: answer in it. Asked
-        # in that same language keeps their style (Kanglish...), else plain.
-        lang = SCREEN_LANG["lang"]
-        style = style if asked_in == lang else "native"
+    # The answer comes back in the language the question was asked in (and in
+    # the same style: Kanglish/Hinglish stays mixed), whatever language the
+    # screen was set to. Only the screen's own labels follow SCREEN_LANG.
     print(f"\n  you    > {question}")
     if lang != "en" or english != question:
         print(f"           ({lang}) {english}")
