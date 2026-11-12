@@ -137,6 +137,20 @@ class KrishiApiTests(unittest.TestCase):
     def test_greeting(self):
         self.assertEqual(self.ask("Namaskara")["answer"], krishi.META["greeting"])
 
+    def test_kiosk_loudness_raises_level_and_keeps_headroom_for_firmware_gain(self):
+        import numpy as np
+        t = np.arange(16000) / 16000
+        x = (0.3 * np.sin(2 * np.pi * 220 * t) * 32767).astype("<i2")
+        with mock.patch.dict(os.environ, {"KIOSK_LOUDNESS": "6"}):
+            y = np.frombuffer(krishi.kiosk_loud(x.tobytes()), dtype="<i2").astype(np.float32)
+        rms = lambda a: float(np.sqrt(np.mean(np.asarray(a, np.float32) ** 2)))
+        after_fw = np.clip(y * 2, -32768, 32767)                    # firmware SPEAKER_GAIN 2
+        before_fw = np.clip(x.astype(np.float32) * 2, -32768, 32767)
+        self.assertGreater(rms(after_fw), rms(before_fw))
+        self.assertLessEqual(np.abs(y).max(), 16384)                # half scale: x2 never hard-clips
+        with mock.patch.dict(os.environ, {"KIOSK_LOUDNESS": "0"}):
+            self.assertEqual(krishi.kiosk_loud(x.tobytes()), x.tobytes())
+
     def test_spoken_units(self):
         self.assertIn("kilograms per hectare", krishi.for_speech("50 kg/ha"))
 

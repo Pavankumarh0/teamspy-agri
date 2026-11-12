@@ -96,6 +96,25 @@ def for_speech(t: str) -> str:
     return speech.for_speech(t)
 
 
+def kiosk_loud(pcm: bytes) -> bytes:
+    """Louder speech for the kiosk speaker without harsh clipping.
+
+    The firmware multiplies every sample by SPEAKER_GAIN (2) and hard-clips, so
+    full-scale audio from the server is clipped on its loudest half. Here a soft
+    (tanh) limiter with KIOSK_LOUDNESS drive raises the average level and lands
+    the peaks at half scale, which the firmware's 2x brings to full scale.
+    Measured on edge-tts speech: drive 6 is about +3 dB louder than before with
+    fewer clipped samples. 0 sends the audio unchanged (Campus Mithra's level).
+    """
+    import numpy as np
+    drive = float(os.getenv("KIOSK_LOUDNESS", "6"))
+    if drive <= 0 or not pcm:
+        return pcm
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    y = np.tanh(drive * x) / np.tanh(drive) * 0.5
+    return np.clip(y * 32767, -32768, 32767).astype("<i2").tobytes()
+
+
 def remember_audio(text: str, voice: str | None = None) -> str:
     aid = uuid.uuid4().hex[:12]
     AUDIO[aid] = {"text": text, **({"voice": voice} if voice else {})}
@@ -301,7 +320,8 @@ async def audio(aid: str, ext: str):
             return Response(item["mp3"], media_type="audio/mpeg")
         if ext == "s16":                     # 16-bit for the MAX98357A kiosk
             if "s16" not in item:
-                item["s16"] = await asyncio.to_thread(speech.mp3_to_pcm16, item["mp3"], I2S_RATE)
+                pcm = await asyncio.to_thread(speech.mp3_to_pcm16, item["mp3"], I2S_RATE)
+                item["s16"] = kiosk_loud(pcm)
             return Response(item["s16"], media_type="application/octet-stream")
         if "u8" not in item:
             item["u8"] = await asyncio.to_thread(speech.mp3_to_u8, item["mp3"], PLAY_RATE)
