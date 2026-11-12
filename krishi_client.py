@@ -632,6 +632,8 @@ class Esp32Link:
                 note = f"{int(played) / bytes_per_second:.1f}s"
                 if int(gaps):
                     note += f", {gaps} gap(s)"
+                if line.endswith(",stopped"):          # the farmer pressed the button
+                    note += " - stopped by the button"
                 return True, note
             elif line.startswith("ERR:"):
                 return False, line[4:]

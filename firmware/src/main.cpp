@@ -1541,6 +1541,8 @@ static struct {
   bool playing;          // prebuffer reached
   bool starved;          // currently in an underrun
   bool draining;         // all data handed to the DMA; waiting for it to play out
+  bool stopping;         // stopped by the button: discarding speech still on its way
+  uint32_t stopMs;
   uint32_t total, received, granted, played, gaps;
   uint32_t lastRxMs, drainUntilMs;
 } aud;
@@ -1569,8 +1571,16 @@ static inline int16_t ringPop16() {
 enum KioskState { ST_IDLE, ST_RECORDING, ST_BUSY };
 static KioskState state = ST_IDLE;
 
+static bool skipNextSpeech = false;     // button pressed while the answer was being prepared
+
 static void startAudio(uint32_t bytes) {
   if (bytes == 0) { Serial.println(F("DONE:0,0")); return; }
+  if (skipNextSpeech) {                  // the farmer already pressed stop: don't speak at all
+    skipNextSpeech = false;
+    Serial.println(F("DONE:0,0,stopped"));
+    Serial.println(F("[esp] answer not spoken (stopped by the button)"));
+    return;
+  }
   ringHead = ringTail = ringCount = 0;
   stageLen = stageOff = 0;
   memset(&aud, 0, sizeof(aud));
@@ -1601,7 +1611,36 @@ static void finishAudio(bool ok) {
 
 /* Called continuously while a clip is active. Never blocks: the I2S writes use
    a zero timeout, so the button and the serial link stay responsive. */
+/* Button pressed while speaking: silence now, tell the PC to stop sending, and
+   drop the speech it had already been allowed to send (see serviceAudio). */
+static void stopSpeaking() {
+  if (!aud.active || aud.stopping) return;
+  aud.stopping = true;
+  aud.stopMs = millis();
+  i2s_zero_dma_buffer(AMP_PORT);
+  ringHead = ringTail = ringCount = 0;
+  stageLen = stageOff = 0;
+  Serial.printf("DONE:%lu,%lu,stopped\n", (unsigned long)aud.played, (unsigned long)aud.gaps);
+  talkLevel = 0.0f;
+  setMood(MOOD_IDLE);
+  drawTitleBar("stopped");
+}
+
 static void serviceAudio() {
+  if (aud.stopping) {
+    // Bytes already granted keep arriving for a moment: read and discard them,
+    // so they are never taken for commands. Then playback is over.
+    while (aud.received < aud.granted && Serial.available() > 0) {
+      Serial.read();
+      aud.received++;
+    }
+    if (aud.received >= aud.granted || millis() - aud.stopMs > 1500) {
+      aud.active = false;
+      aud.stopping = false;
+      Serial.println(F("[esp] answer stopped by the button"));
+    }
+    return;
+  }
   // 1. Move whatever has arrived into the ring, in contiguous runs.
   while (aud.received < aud.total && ringCount < AUDIO_RING_BYTES) {
     size_t avail = Serial.available();
@@ -2599,6 +2638,7 @@ static void handleLine(char *line) {
     return;
   }
   if (strcmp(line, "IDLE") == 0) {
+    skipNextSpeech = false;                    // a stop only ever applies to the answer in progress
     if (state == ST_BUSY) state = ST_IDLE;
     if (mood == MOOD_THINK || mood == MOOD_TALK) setMood(MOOD_IDLE);
     drawTitleBar("ready");
@@ -2825,8 +2865,15 @@ void loop() {
         Serial.println(F("[esp] button pressed - recording"));
         startRecording(true, REC_MAX_MS);
       }
-    } else if (state != ST_RECORDING) {
-      Serial.println(F("[esp] button pressed - ignored: still answering"));
+    } else if (aud.active) {
+      btnArmed = false;                        // a press while speaking = stop the answer
+      Serial.println(F("[esp] button pressed - stopping the answer"));
+      stopSpeaking();
+    } else if (state == ST_BUSY) {
+      btnArmed = false;                        // still thinking: don't speak this answer
+      skipNextSpeech = true;
+      drawTitleBar("stopped");
+      Serial.println(F("[esp] button pressed - this answer will not be spoken"));
     }
   } else if (edge == -1) {
     btnArmed = true;
