@@ -181,6 +181,13 @@ A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the
 ## Languages, loudness, knowledge base
 
 - **Languages:** English, Kannada and Hindi (`KIOSK_LANGUAGES=en,kn,hi`). Kanglish and Hinglish questions get Kanglish/Hinglish answers, and pure Kannada/Hindi get pure answers, as in Campus Mithra. The TFT shows Latin script.
+- **Kannada / Hindi on the screen:** the TFT fonts are ASCII only, and Kannada/Devanagari need shaping (vowel signs, conjuncts).
+  - The PC renders those questions and answers itself (`kiosk_text.py`: HarfBuzz + the Windows *Nirmala UI* font, 18 px) and sends them as 1-bit bitmaps (`GQ:`/`GA:`/`GR:` lines).
+  - Kanglish answers keep their English words. Up to 12 pages, turned while the answer is spoken.
+  - If the libraries or font are missing, the screen falls back to Latin letters. Needs `uharfbuzz` and `freetype-py` (in `requirements.txt`).
+- **Watching the soil sensor (UNO Q) live**, from the PC:
+  `& "$env:LOCALAPPDATA\Arduino15\packages\arduino\tools\adb\32.0.0\adb.exe" shell arduino-app-cli app logs /home/arduino/ArduinoApps/smart-krishi-sensors --follow`
+  (one line per reading: `soil_raw=…`, faults). Or open the app in App Lab: the sketch's own Serial Monitor lines also show the sample spread.
 - **Speaker loudness:** `KIOSK_LOUDNESS` (default 6, 0 = Campus Mithra's level). It is a soft limiter applied before the firmware's 2x gain.
 - **Knowledge base (`kb/`)** is **starter content, not yet verified**, and has no fertilizer doses. Check it against the official package of practices (UAS Bangalore / KVK) before farmers rely on it.
 - **Back to Campus Mithra:** flash Campus Mithra's `firmware/` again.

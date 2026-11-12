@@ -574,6 +574,20 @@ class Esp32Link:
     def heartbeat(self): self._send("HB")
     def idle(self): self._send("IDLE")      # the kiosk may accept a new button press
     def dashboard(self, line): self._send(line[:400])   # "D:k=v;..." - DashboardPoller.take_line()
+
+    def glyphs(self, header, rows):
+        """Kannada/Hindi text as 1-bit rows (kiosk_text.py): "GQ:w,h" or
+        "GA:w,h,pages", then one "GR:<hex>" line per row with trailing zero
+        bytes dropped. Paced in ~1 KB bursts so the kiosk's 4 KB receive
+        buffer is never overrun while it is busy drawing."""
+        out = [header]
+        for r in rows:
+            out.append("GR:" + r.rstrip(b"\x00").hex())
+        data = ("\n".join(out) + "\n").encode("ascii")
+        for i in range(0, len(data), 1024):
+            self.ser.write(data[i:i + 1024])
+            self.ser.flush()
+            time.sleep(0.012)
     def volume(self, pct): self._send(f"VOL:{max(0, min(100, int(pct)))}")
     def test_record(self, ms): self._send(f"MICREC:{int(ms)}")
 
@@ -663,7 +677,25 @@ def connect_esp32(port, volume=None):
 # Server
 # --------------------------------------------------------------------------- #
 
-def deliver(result, server, esp=None, play=True, pc_audio=False):
+def send_indic_text(esp, question, answer=None):
+    """Kannada/Hindi question (and answer) to the kiosk TFT in their own script.
+    Returns True when sent; on any problem the kiosk shows the Latin text."""
+    try:
+        import kiosk_text
+        if not (kiosk_text.has_indic(answer if answer is not None else question) and kiosk_text.available()):
+            return False
+        q_rows = kiosk_text.render_question(question or "")
+        esp.glyphs(f"GQ:{kiosk_text.TEXT_W},{len(q_rows)}", q_rows)
+        if answer is not None:
+            pages, page_h = kiosk_text.render_answer(answer, len(q_rows))
+            esp.glyphs(f"GA:{kiosk_text.TEXT_W},{page_h},{len(pages)}", [r for p in pages for r in p])
+        return True
+    except Exception as exc:
+        print(f"           (Kannada/Hindi script for the TFT failed: {exc}; showing Latin letters)")
+        return False
+
+
+def deliver(result, server, esp=None, play=True, pc_audio=False, question_text=None):
     """Print the answer, put it on the TFT, and speak it.
 
     With an ESP32 connected the answer is spoken on the kiosk speaker; the PC
@@ -682,7 +714,10 @@ def deliver(result, server, esp=None, play=True, pc_audio=False):
         print("           referred: (nothing in the knowledge base)")
     if esp:
         esp.source(", ".join(sources))     # before the answer, so it draws once
-        esp.answer(result.get("answer_display") or answer)   # the TFT shows Latin letters only
+        if result.get("language", "en") != "en":
+            # in Kannada/Hindi script; A: below still carries the Latin copy as a fallback
+            send_indic_text(esp, question_text or result.get("question", ""), answer)
+        esp.answer(result.get("answer_display") or answer)
     if not (play and result.get("audio_id")):
         if esp:
             esp.status("ready")
@@ -790,15 +825,16 @@ def handle_question(server, question, session, esp, play, pc_audio, heard=None):
     if lang != "en" or english != question:
         print(f"           ({lang}) {english}")
     if esp:
+        if lang != "en":
+            send_indic_text(esp, question)            # the question in its own script
         esp.question(q.get("display") or question)   # shown now, while Gemma works
     t0 = time.time()
     result = ask_text(server, english, session) if lang == "en" else ask_text(server, english, session, lang, style)
     print(f"           ({time.time() - t0:.1f}s)")
     sensor = result.get("sensor")
     if sensor:
-        tag = "MOCK (simulated)" if sensor.get("source") == "mock" else "sensor"
-        print(f"           soil reading used: {tag} {sensor.get('device_id')} moisture {sensor.get('soil_moisture')}%")
-    deliver(result, server, esp, play, pc_audio)
+        print(f"           live sensor reading used: {sensor.get('device_id')} ({sensor.get('status')})")
+    deliver(result, server, esp, play, pc_audio, question_text=question)
 
 
 # --------------------------------------------------------------------------- #

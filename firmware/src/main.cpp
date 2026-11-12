@@ -568,7 +568,7 @@ static void bubbleMessage(const char *headline, const char *body, uint16_t headC
 
 // --- the visitor's question + Mithra's answer, paged -------------------------
 
-static const int MAX_PAGES = 8;
+static const int MAX_PAGES = 12;
 static char   questionText[MAX_LINE + 1] = "";
 static char   answerText[MAX_LINE + 1];
 static char   answerSource[80] = "";     // knowledge-base file(s) the answer came from
@@ -577,8 +577,108 @@ static int    pageCount = 0;
 static int    pageShown = -1;
 static int16_t answerTop = IN_TOP;
 
+// --- Kannada / Hindi: text drawn on the PC --------------------------------------
+//
+// The TFT fonts are ASCII only, and Kannada / Devanagari need shaping (vowel
+// signs, conjuncts), so the PC renders such questions and answers itself
+// (kiosk_text.py: HarfBuzz + the Nirmala UI font) and sends 1-bit bitmaps,
+// IN_W pixels wide, before the Q: / A: line they belong to:
+//   GQ:<w>,<h>          question strip, then h  "GR:<hex>" rows
+//   GA:<w>,<h>,<pages>  answer pages,   then h*pages "GR:<hex>" rows
+// A row is (w+7)/8 bytes in hex, MSB = leftmost pixel; trailing zero bytes may
+// be left out (an empty row is blank). Q: / A: then show the bitmaps; without
+// them (English, or the PC could not render) the Latin text is shown as before.
+static const int GFX_BPR = (IN_W + 7) / 8;
+static const int GFX_Q_MAX_H = 60;
+static const int GFX_A_MAX_H = 170;
+static uint8_t gfxQ[GFX_Q_MAX_H * GFX_BPR];
+static uint8_t gfxA[MAX_PAGES * GFX_A_MAX_H * GFX_BPR];
+static int  gfxQH = 0, gfxAH = 0, gfxAPages = 0;
+static int  gfxTarget = 0;                      // receiving: 0 nothing, 1 question, 2 answer
+static int  gfxRowsWant = 0, gfxRowsGot = 0;
+static bool gfxQReady = false, gfxAReady = false;   // complete, waiting for its Q: / A:
+static bool gfxQShown = false, gfxAShown = false;   // the current screen uses them
+
+static void gfxForget() {
+  gfxQShown = gfxAShown = gfxQReady = gfxAReady = false;
+  gfxTarget = 0;
+}
+
+/* Blits a 1-bit bitmap as runs of one colour (one SPI burst per run), clipped
+   at maxY. A page turn mid-speech costs a few ms, so the audio never starves. */
+static void drawGfx(const uint8_t *rows, int h, int16_t x, int16_t y, int16_t maxY, uint16_t fg, uint16_t bg) {
+  if (y + h > maxY) h = maxY - y;
+  if (h <= 0) return;
+  tft.startWrite();
+  tft.setAddrWindow(x, y, IN_W, h);
+  for (int r = 0; r < h; r++) {
+    const uint8_t *row = rows + r * GFX_BPR;
+    bool on = false;
+    uint32_t run = 0;
+    for (int c = 0; c < IN_W; c++) {
+      const bool px = row[c >> 3] & (0x80 >> (c & 7));
+      if (px != on && run) { tft.pushColor(on ? fg : bg, run); run = 0; }
+      on = px;
+      run++;
+    }
+    tft.pushColor(on ? fg : bg, run);
+  }
+  tft.endWrite();
+}
+
+/* GQ: / GA: header -> start receiving rows. */
+static void gfxBegin(int target, const char *args) {
+  int w = 0, h = 0, pages = 1;
+  const int n = sscanf(args, "%d,%d,%d", &w, &h, &pages);
+  const int maxH = target == 1 ? GFX_Q_MAX_H : GFX_A_MAX_H;
+  if (n < 2 || w != IN_W || h < 0 || h > maxH || pages < 1 || pages > (target == 1 ? 1 : MAX_PAGES)) {
+    Serial.printf("ERR:gfx header rejected (w=%d h=%d pages=%d)\n", w, h, pages);
+    gfxTarget = 0;
+    return;
+  }
+  gfxTarget = target;
+  gfxRowsWant = h * pages;
+  gfxRowsGot = 0;
+  if (target == 1) { gfxQH = h; gfxQReady = false; memset(gfxQ, 0, sizeof gfxQ); }
+  else { gfxAH = h; gfxAPages = pages; gfxAReady = false; memset(gfxA, 0, (size_t)h * pages * GFX_BPR); }
+  if (gfxRowsWant == 0) {                       // nothing to receive
+    if (target == 1) gfxQReady = true; else gfxAReady = true;
+    gfxTarget = 0;
+  }
+}
+
+static inline int hexNibble(char c) {
+  return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* GR: one row. */
+static void gfxRow(const char *hex) {
+  if (!gfxTarget || gfxRowsGot >= gfxRowsWant) return;
+  uint8_t *dst = (gfxTarget == 1 ? gfxQ : gfxA) + (size_t)gfxRowsGot * GFX_BPR;
+  for (int i = 0; i < GFX_BPR && hex[2 * i] && hex[2 * i + 1]; i++) {
+    const int hi = hexNibble(hex[2 * i]), lo = hexNibble(hex[2 * i + 1]);
+    if (hi < 0 || lo < 0) break;
+    dst[i] = (uint8_t)(hi << 4 | lo);
+  }
+  if (++gfxRowsGot == gfxRowsWant) {
+    if (gfxTarget == 1) gfxQReady = true; else gfxAReady = true;
+    Serial.printf("[esp] %s text received (%d rows)\n", gfxTarget == 1 ? "question" : "answer", gfxRowsGot);
+    gfxTarget = 0;
+  }
+}
+
 /* Draws the question strip at the top of the bubble; returns the y below it. */
 static int16_t drawQuestionStrip() {
+  if (gfxQShown) {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(COL_MUTE, COL_BUBBLE);
+    tft.drawString("You asked", IN_X, IN_TOP, 1);
+    const int16_t qTop = IN_TOP + 10;
+    drawGfx(gfxQ, gfxQH, IN_X, qTop, FOOT_Y, COL_MINT_D, COL_BUBBLE);
+    const int16_t bottom = qTop + gfxQH + 3;   // kiosk_text.ANSWER_GAP = 3 + 5
+    tft.drawFastHLine(IN_X, bottom, IN_W, 0xD6BA);
+    return bottom + 5;
+  }
   if (!questionText[0]) return IN_TOP + 2;
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_MUTE, COL_BUBBLE);
@@ -598,8 +698,12 @@ static void drawAnswerPage(int page) {
   if (page < 0 || page >= pageCount) return;
   drawBubble();
   answerTop = drawQuestionStrip();
-  wrapPass(answerText, pageStart[page], 2, IN_W, linesFor(2, FOOT_Y - answerTop - 2),
-           true, IN_X, answerTop, COL_INK, COL_BUBBLE);
+  if (gfxAShown) {
+    drawGfx(gfxA + (size_t)page * gfxAH * GFX_BPR, gfxAH, IN_X, answerTop, FOOT_Y - 2, COL_INK, COL_BUBBLE);
+  } else {
+    wrapPass(answerText, pageStart[page], 2, IN_W, linesFor(2, FOOT_Y - answerTop - 2),
+             true, IN_X, answerTop, COL_INK, COL_BUBBLE);
+  }
   // footer: where it came from, and which page
   tft.setTextDatum(BL_DATUM);
   tft.setTextColor(COL_MUTE, COL_BUBBLE);
@@ -641,6 +745,9 @@ static void drawThinkingBubble() {
 static void showQuestion(const char *text) {
   bool dropped = false;
   sanitiseAscii(text, questionText, sizeof(questionText), &dropped);
+  gfxQShown = gfxQReady;                       // the PC sent this question in Kannada/Hindi script
+  gfxQReady = false;
+  gfxAShown = false;
   drawThinkingBubble();
   if (dropped) Serial.println(F("[esp] non-ASCII characters shown as '?'"));
 }
@@ -653,6 +760,16 @@ static void showAnswer(const char *text) {
   bool dropped = false;
   sanitiseAscii(text, answerText, sizeof(answerText), &dropped);
   const size_t len = strlen(answerText);
+
+  if (gfxQReady) { gfxQShown = true; gfxQReady = false; }   // re-sent with the answer
+  if (gfxAReady) {                             // pages already laid out by the PC
+    gfxAReady = false;
+    gfxAShown = true;
+    pageCount = gfxAPages;
+    drawAnswerPage(0);
+    return;
+  }
+  gfxAShown = false;
 
   // the strip's height decides how much room each page has
   drawBubble();
@@ -690,6 +807,7 @@ static void drawIdleScreen() {
   questionText[0] = '\0';
   answerSource[0] = '\0';
   pageCount = 0;
+  gfxForget();
   mood = MOOD_IDLE;
   drawBuddy();
   drawIdleBubble();
@@ -707,6 +825,7 @@ static void drawListening(const char *prompt) {
   questionText[0] = '\0';
   answerSource[0] = '\0';
   pageCount = 0;
+  gfxQShown = gfxAShown = false;
   setMood(MOOD_LISTEN);
   bubbleMessage(prompt, "I'm all ears - let go of the button when you're done.");
   memset(meterHist, 0, sizeof(meterHist));
@@ -1466,6 +1585,9 @@ static void handleLine(char *line) {
 
   if (strcmp(line, "HB") == 0) { lastHbMs = millis(); return; }
   if (strcmp(line, "PING") == 0) { Serial.println(F("PONG")); return; }
+  if (strncmp(line, "GR:", 3) == 0) { gfxRow(line + 3); return; }       // Kannada/Hindi text rows
+  if (strncmp(line, "GQ:", 3) == 0) { gfxBegin(1, line + 3); return; }
+  if (strncmp(line, "GA:", 3) == 0) { gfxBegin(2, line + 3); return; }
   if (strncmp(line, "D:", 2) == 0) {           // dashboard readings from the PC app
     parseDash(line + 2);
     if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashUpdate();
@@ -1476,6 +1598,7 @@ static void handleLine(char *line) {
       questionText[0] = '\0';
       answerSource[0] = '\0';
       pageCount = 0;
+      gfxForget();
       mood = MOOD_IDLE;
       dashUpdate();
     } else {

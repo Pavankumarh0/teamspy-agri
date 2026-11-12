@@ -25,8 +25,12 @@ if (-not (Test-Path $py)) {
 
 # 1. Stop earlier copies. An old server would keep port 8001 (and run stale
 #    code), an old client would keep COM9 and the hotkey.
+#    Matched on the command line, not the executable: on this PC the venv's
+#    python.exe is a launcher that starts the real interpreter as a child
+#    process with the same command line, and that child is what holds the port.
 $old = Get-CimInstance Win32_Process | Where-Object {
-    $_.ExecutablePath -eq $py -and $_.CommandLine -match 'app\.py|krishi_client\.py'
+    $_.Name -like 'python*.exe' -and $_.CommandLine -and
+    $_.CommandLine.Contains($py) -and $_.CommandLine -match 'app\.py|krishi_client\.py'
 }
 foreach ($p in $old) {
     Write-Host "Stopping old $($p.ProcessId): $($p.CommandLine.Split(' ')[-1])"
