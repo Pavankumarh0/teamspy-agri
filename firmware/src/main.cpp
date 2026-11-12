@@ -899,15 +899,21 @@ static struct {
 } dd;
 
 struct DField { char txt[40]; uint16_t fg; bool drawn; };
-enum { F_V0, F_V1, F_V2, F_V3, F_S0, F_S1, F_S2, F_S3, F_SENSOR, F_LINK, F_AGE, F_COUNT };
+enum { F_V0, F_V1, F_V2, F_S0, F_S1, F_S2, F_SENSOR, F_LINK, F_AGE, F_COUNT };
 static DField dfields[F_COUNT];
 static uint16_t dotColour = 0;
 static uint32_t lastDashTickMs = 0;
 
-static const int16_t CARD_W = 148, CARD_H = 74;
-static const int16_t CARD_X[4] = {8, 164, 8, 164};
-static const int16_t CARD_Y[4] = {38, 38, 118, 118};
-static const char *const CARD_LABEL[4] = {"Temperature", "Humidity", "Soil moisture", "Air - MQ-135"};
+// Temperature and humidity side by side; soil moisture full width below,
+// with a bar. (The MQ-135 air-quality card was removed from the dashboard.)
+static const int CARDS = 3;
+static const int16_t CARD_H = 74;
+static const int16_t CARD_X[CARDS] = {8, 164, 8};
+static const int16_t CARD_Y[CARDS] = {38, 38, 118};
+static const int16_t CARD_WS[CARDS] = {148, 148, 304};
+static const char *const CARD_LABEL[CARDS] = {"Temperature", "Humidity", "Soil moisture"};
+static int barShown = -2;                     // moisture bar cache (-1 = empty bar)
+static uint16_t barColour = 0;
 
 static void dashCopy(char *dst, size_t n, const char *src) {
   size_t i = 0;
@@ -966,7 +972,7 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   dashCopy(f.txt, sizeof f.txt, key);
   f.fg = fg;
   f.drawn = true;
-  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 26, w = CARD_W - 20;
+  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 26, w = i == 2 ? 140 : CARD_WS[i] - 20;
   tft.fillRect(x, y, w, 28, D_CARD);
   const uint8_t font = tft.textWidth(value, 4) + 30 <= w ? 4 : 2;     // "Not calibrated" uses font 2
   tft.setTextDatum(TL_DATUM);
@@ -981,8 +987,25 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   }
 }
 
+/* Soil moisture bar in the right half of the soil card: pct 0-100, or -1 = none. */
+static void dashBar(int pct, uint16_t colour) {
+  if (pct == barShown && colour == barColour) return;
+  barShown = pct;
+  barColour = colour;
+  const int16_t bx = CARD_X[2] + 160, by = CARD_Y[2] + 30, bw = 130, bh = 18;
+  tft.fillRoundRect(bx, by, bw, bh, 4, D_BAR);
+  tft.drawRoundRect(bx, by, bw, bh, 4, D_MUTE);
+  if (pct > 0) tft.fillRoundRect(bx + 2, by + 2, (int16_t)((bw - 4) * pct / 100), bh - 4, 3, colour);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(D_MUTE, D_CARD);
+  tft.fillRect(bx, by + bh + 2, bw, 10, D_CARD);
+  tft.drawString("dry", bx, by + bh + 3, 1);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("wet", bx + bw, by + bh + 3, 1);
+}
+
 static void dashSub(int i, const char *txt, uint16_t fg) {
-  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 56, CARD_W - 20, 12, CARD_X[i] + 10, CARD_Y[i] + 57,
+  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 56, CARD_WS[i] - 20, 12, CARD_X[i] + 10, CARD_Y[i] + 57,
             TL_DATUM, 1, txt, fg, D_CARD);
 }
 
@@ -993,7 +1016,7 @@ static void dashUpdate() {
   const bool online = !strcmp(dd.st, "online");
   const bool live = pc && fresh && dd.srvOk && online;          // values are current measurements
 
-  // --- the four cards ---
+  // --- the cards ---
   const uint16_t vfg = live ? D_TEXT : D_DIM;
   const char *old = (dd.have && !live) ? "last known" : "";
   char buf[40];
@@ -1001,20 +1024,25 @@ static void dashUpdate() {
   else { dashValue(0, "--", "", D_DIM); dashSub(0, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
   if (dd.h[0]) { dashValue(1, dd.h, "%", vfg); dashSub(1, old[0] ? old : "relative, DHT11", old[0] ? D_WARN : D_MUTE); }
   else { dashValue(1, "--", "", D_DIM); dashSub(1, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+  // Soil moisture % = (DRY - RAW) / (DRY - WET) x 100, worked out on the UNO Q
+  // from its two calibration readings (python/config.json there).
   if (dd.sv && dd.sp[0]) {
+    const int pct = constrain(atoi(dd.sp), 0, 100);
     dashValue(2, dd.sp, "%", vfg);
-    snprintf(buf, sizeof buf, "raw %s%s", dd.sr, old[0] ? ", last known" : "");
+    snprintf(buf, sizeof buf, "raw %s%s%s", dd.sr, atol(dd.sr) >= 16319 ? " - probe in air / dry?" : "",
+             old[0] ? ", last known" : "");
     dashSub(2, buf, old[0] ? D_WARN : D_MUTE);
+    dashBar(pct, !live ? D_DIM : pct < 30 ? D_WARN : D_LEAF);
   } else if (dd.sr[0]) {
     dashValue(2, "Not calibrated", "", D_WARN);
     snprintf(buf, sizeof buf, "raw %s%s", dd.sr, atol(dd.sr) >= 16319 ? " - check probe" : "");
     dashSub(2, buf, D_MUTE);
-  } else { dashValue(2, "--", "", D_DIM); dashSub(2, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
-  if (dd.mq[0]) {
-    dashValue(3, dd.mq, "raw", dd.mv ? vfg : D_DIM);
-    dashSub(3, !dd.mv ? "warming up / check" : old[0] ? "last known" : "uncalibrated, not ppm",
-            (!dd.mv || old[0]) ? D_WARN : D_MUTE);
-  } else { dashValue(3, "--", "", D_DIM); dashSub(3, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+    dashBar(-1, D_DIM);
+  } else {
+    dashValue(2, "--", "", D_DIM);
+    dashSub(2, dd.have ? "no valid reading" : "waiting for data", D_MUTE);
+    dashBar(-1, D_DIM);
+  }
 
   // --- status line 1: the sensor device, and the PC / server link ---
   const char *sensorTxt;
@@ -1055,8 +1083,8 @@ static void dashDrawFrame() {
   tft.setTextColor(D_LEAF, D_BAR);
   tft.drawString("SMART KRISHI", 26, 16, 4);
   drawBtn(BTN_FERT, "Fertilizer >", touchReady ? D_LEAF : D_CARD, touchReady ? D_BAR : D_MUTE);
-  for (int i = 0; i < 4; i++) {
-    tft.fillRoundRect(CARD_X[i], CARD_Y[i], CARD_W, CARD_H, 8, D_CARD);
+  for (int i = 0; i < CARDS; i++) {
+    tft.fillRoundRect(CARD_X[i], CARD_Y[i], CARD_WS[i], CARD_H, 8, D_CARD);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(D_MUTE, D_CARD);
     tft.drawString(CARD_LABEL[i], CARD_X[i] + 10, CARD_Y[i] + 7, 2);
@@ -1065,6 +1093,7 @@ static void dashDrawFrame() {
   tft.setTextColor(D_DIM, D_BG);
   tft.drawString(touchReady ? "Button tap: chat  hold: ask" : "Press screen firmly to set up touch", 312, 226, 1);
   for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
+  barShown = -2;
   dotColour = 0;
   dashUpdate();
 }
@@ -1596,20 +1625,41 @@ static int pollButton() {
 static Preferences prefs;
 static uint16_t touchCal[5];
 
+static const uint16_t TOUCH_CAL_MIN_RANGE = 1500;
+
 static void touchBegin() {
   prefs.begin("krishi", false);
-  touchReady = prefs.getBytes("tcal", touchCal, sizeof touchCal) == sizeof touchCal;
+  touchReady = prefs.getBytes("tcal", touchCal, sizeof touchCal) == sizeof touchCal &&
+               touchCal[1] >= TOUCH_CAL_MIN_RANGE && touchCal[3] >= TOUCH_CAL_MIN_RANGE;
   if (touchReady) tft.setTouch(touchCal);
 }
 
+// A good calibration spans most of the panel: this one reads raw x ~450-3600
+// and y ~430-3750 across the screen. Four touches in one spot give a tiny
+// range (seen: 86) and would make every tap land in the wrong place.
+
 static void touchCalibrate() {
-  tft.fillScreen(D_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(D_TEXT, D_BG);
-  tft.drawString("Touch calibration", 160, 100, 4);
-  tft.drawString("Touch each corner arrow as it appears", 160, 136, 2);
-  delay(1500);
-  tft.calibrateTouch(touchCal, D_LEAF, D_BG, 15);      // blocks until the 4 corners are touched
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    tft.fillScreen(D_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(D_TEXT, D_BG);
+    tft.drawString(attempt == 1 ? "Touch calibration" : "Let's try again", 160, 96, 4);
+    tft.drawString("An arrow appears in each corner in turn.", 160 , 132, 2);
+    tft.drawString("Touch exactly on the arrow tip each time.", 160, 152, 2);
+    delay(2500);
+    uint16_t cal[5];
+    tft.calibrateTouch(cal, D_LEAF, D_BG, 15);         // blocks until the 4 corners are touched
+    Serial.printf("[esp] touch calibration %d: %u %u %u %u %u\n", attempt, cal[0], cal[1], cal[2], cal[3], cal[4]);
+    if (cal[1] >= TOUCH_CAL_MIN_RANGE && cal[3] >= TOUCH_CAL_MIN_RANGE) {
+      memcpy(touchCal, cal, sizeof touchCal);
+      break;
+    }
+    Serial.println(F("[esp] touch calibration rejected: the corners were not touched - try again"));
+    if (attempt == 3) {                                // keep the old one (if any)
+      tft.setTouch(touchCal);
+      return;
+    }
+  }
   prefs.putBytes("tcal", touchCal, sizeof touchCal);
   tft.setTouch(touchCal);
   touchReady = true;
@@ -1945,11 +1995,21 @@ static void touchDiag(int n) {
 
 /* A real finger press on an uncalibrated screen: firm, and x, y inside the
    panel's raw range (an absent controller reads 0 or 4095 there). */
-static bool rawPressLooksReal() {
+static uint32_t lastPressLogMs = 0;
+
+/* Raw reading; while pressed (z > 100) it is logged a few times a second as
+   "[esp] touch press raw x y z" - what to look at if taps do nothing. Returns
+   whether this is a firm press. Pressure alone decides: idle z on this panel
+   is 5-40, and an absent controller reads 4095. */
+static bool rawPress() {
   uint16_t x = 0, y = 0;
   tft.getTouchRaw(&x, &y);
   const uint16_t z = tft.getTouchRawZ();
-  return z > TOUCH_Z_MIN && z < 4000 && x > 150 && x < 3950 && y > 150 && y < 3950;
+  if (z > 300 && millis() - lastPressLogMs > 300) {
+    lastPressLogMs = millis();
+    Serial.printf("[esp] touch press raw x=%u y=%u z=%u (%s)\n", x, y, z, touchReady ? "calibrated" : "not calibrated");
+  }
+  return z > TOUCH_Z_MIN && z < 4000;
 }
 
 /* Every 25 ms while idle: one tap per press (released between taps). Before
@@ -1958,7 +2018,7 @@ static void pollTouch() {
   if (millis() - lastTouchPollMs < 25) return;
   lastTouchPollMs = millis();
   if (!touchReady) {
-    uncalPresses = rawPressLooksReal() ? uncalPresses + 1 : 0;
+    uncalPresses = rawPress() ? uncalPresses + 1 : 0;
     if (uncalPresses >= 12) {
       uncalPresses = 0;
       Serial.println(F("[esp] touch pressed on an uncalibrated screen - calibrating"));
@@ -1967,6 +2027,7 @@ static void pollTouch() {
     }
     return;
   }
+  rawPress();                                   // logs raw readings while pressed
   uint16_t x = 0, y = 0;
   const bool down = tft.getTouch(&x, &y, TOUCH_Z_MIN);
   if (down && !touchHeld) {

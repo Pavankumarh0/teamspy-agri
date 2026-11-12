@@ -79,8 +79,7 @@ multimeter before connecting A1. All grounds must be joined.
 - The ESP32 boots into the dashboard.
 - Switching screens never resets the board. The chat screen keeps the last answer, so you can tap back to it.
 
-**Dashboard:** title, four cards (temperature, humidity, soil moisture, MQ-135
-raw), sensor online/stale/offline, PC and server link, and "Updated N s ago".
+**Dashboard:** title, temperature and humidity cards, a full-width **soil moisture %** card with a dry–wet bar, sensor online/stale/offline, PC and server link, and "Updated N s ago". The MQ-135 air-quality card was removed. MQ-135 is still read and stored, just not shown.
 - Missing values show `--`.
 - The soil card shows `Not calibrated` plus the raw value until the UNO Q sends a calibrated percentage. A raw value of 16319 or more adds "check probe".
 - MQ-135 is always labelled *raw, uncalibrated, not ppm*.
@@ -127,7 +126,15 @@ Expect `[esp] screen: dashboard` and `button GPIO27: tap ... hold = talk` in the
 
 `config.json` is gitignored: the token is never in the code or the repo.
 
-**Soil calibration** (until it is done, the soil sensor is reported as not calibrated):
+**Soil moisture %** = (DRY − RAW) / (DRY − WET) × 100, clamped to 0–100, computed on the UNO Q.
+
+**Calibrated 12 Nov 2026 on this probe:**
+- **DRY = 16370**: probe in air, steady at 16359–16379.
+- **WET = 7950**: probe settled in water, 7942–7977.
+
+These are in the board's `python/config.json` as `soil_dry_raw` and `soil_wet_raw`. The HW-080 is a resistive probe: in water its reading drifts upward over minutes (polarisation and corrosion of the prongs), so readings can creep. Recalibrate if values look off, and expect the prongs to corrode if the probe is powered continuously.
+
+To recalibrate (until both values are set, the soil sensor reads "Not calibrated"):
 1. Read the raw value with the probe in **dry** soil, then in **thoroughly wet** soil. Use the App Lab console or `GET /api/krishi/sensors/latest`.
 2. Put both in `config.json` as `soil_dry_raw` and `soil_wet_raw`, then restart the app.
 
@@ -192,7 +199,8 @@ A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the
 
 **Calibrate once** (stored in the ESP32's flash). Touch does nothing until this is done:
 1. **Press the screen firmly** anywhere for about ⅓ s. The calibration arrows appear.
-2. Touch each corner arrow as it appears.
+2. Touch **exactly on the tip** of each corner arrow as it appears.
+3. If the four touches don't span the screen, e.g. all in one spot, the calibration is rejected and repeated, up to 3 times. It is never saved. This calibration on 12 Nov: raw x 498–3827, y 400–3702.
 
 Other ways to start it: hold the push button for 1.5 s while the board starts, or send `TCAL` over serial.
 - Until calibrated, the dashboard footer says *Press screen firmly to set up touch*, and the boot log says `NOT calibrated`.

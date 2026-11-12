@@ -58,10 +58,16 @@ _backoff = 2.0
 _sent = 0
 
 
-def soil_percent(raw: int, valid: bool):
-    """Only with both calibration points set (raw ADC in dry and in wet soil)."""
+def soil_percent(raw: int, faults: list[str]):
+    """Moisture % = (DRY - RAW) / (DRY - WET) x 100, clamped to 0-100.
+    Only with both calibration readings set (soil_dry_raw, soil_wet_raw). A
+    reading at the top of the ADC range is just "as dry as the DRY point" once
+    calibrated, so it gives ~0 % (the fault still travels with it); a reading
+    near zero or a noisy one gives no percentage."""
     dry, wet = CFG.get("soil_dry_raw"), CFG.get("soil_wet_raw")
-    if not valid or dry in (None, "") or wet in (None, ""):
+    if dry in (None, "") or wet in (None, ""):
+        return None
+    if any(f in faults for f in ("soil_near_zero", "soil_noisy")):
         return None
     dry, wet = float(dry), float(wet)
     if dry == wet:
@@ -74,13 +80,14 @@ def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, mq_raw, mq_valid, 
     """Bridge handler: build the payload and leave it for the loop."""
     global _pending
     names = [n for bit, n in FAULTS.items() if int(faults) & (1 << bit)]
+    pct = soil_percent(int(soil_raw), names)
     payload = {
         "device_id": CFG["device_id"],
         "temperature_c": round(float(temp_c), 1) if dht_ok else None,
         "humidity_percent": round(float(hum), 1) if dht_ok else None,
         "soil_moisture_raw": int(soil_raw),
-        "soil_moisture_percent": soil_percent(int(soil_raw), bool(soil_valid)),
-        "soil_sensor_valid": bool(soil_valid) and soil_percent(int(soil_raw), bool(soil_valid)) is not None,
+        "soil_moisture_percent": pct,
+        "soil_sensor_valid": pct is not None,
         "mq135_raw": int(mq_raw),
         "mq135_valid": bool(mq_valid),
         "faults": names,
@@ -90,7 +97,7 @@ def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, mq_raw, mq_valid, 
     if CFG.get("crop"):
         payload["crop"] = str(CFG["crop"])[:40]
     print(f"[krishi] #{seq} T={payload['temperature_c']} RH={payload['humidity_percent']} "
-          f"soil_raw={soil_raw} soil_valid={payload['soil_sensor_valid']} mq135_raw={mq_raw} "
+          f"soil_raw={soil_raw} soil_pct={pct if pct is not None else '-'} soil_valid={payload['soil_sensor_valid']} mq135_raw={mq_raw} "
           f"faults={','.join(names) or '-'}")
     with _lock:
         _pending = payload
