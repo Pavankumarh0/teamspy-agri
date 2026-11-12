@@ -78,7 +78,7 @@ def main():
                   "   other USB traffic. A gap or two at the start is harmless.")
         esp.status("self test done")
         print("\nIf the screen showed both panels and you heard a chime and the full answer,")
-        print("the kiosk hardware is working. Next:  python pc_client.py")
+        print("the kiosk hardware is working. Next:  .\\start.ps1  (or python krishi_client.py)")
         return 0 if ok else 1
     finally:
         esp.close()
