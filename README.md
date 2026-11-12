@@ -190,18 +190,21 @@ A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the
 | T_CS | GPIO21 | `TOUCH_CS=21` in `platformio.ini` |
 | **T_IRQ** | **not connected** | GPIO22 is the MAX98357A **DIN** (speaker data). Wiring T_IRQ there would fight the audio line. The firmware polls touch pressure instead, so IRQ isn't needed |
 
-**Calibrate once** (stored in the ESP32's flash):
-1. Hold the push button while powering on or pressing EN, for 1.5 s.
+**Calibrate once** (stored in the ESP32's flash). Touch does nothing until this is done:
+1. **Press the screen firmly** anywhere for about ⅓ s. The calibration arrows appear.
 2. Touch each corner arrow as it appears.
 
-Alternatively, send `TCAL` over serial. Until it is calibrated, taps are ignored (an unconnected touch controller would read as a press). The dashboard footer says *Touch: hold button at power-on*, and the boot log says `NOT calibrated`.
+Other ways to start it: hold the push button for 1.5 s while the board starts, or send `TCAL` over serial.
+- Until calibrated, the dashboard footer says *Press screen firmly to set up touch*, and the boot log says `NOT calibrated`.
+- `TRAW:20` over serial prints raw touch readings: z stays near 0 with no touch (this panel: 5–40). x/y stuck at 0 or 4095 even when pressed means T_CS or the shared SPI wiring is wrong.
 
 ### Using it
 1. On the dashboard, tap **Fertilizer >**.
 2. On the crop screen, pick a crop: Tomato, Paddy, Ragi, Maize or Onion.
-3. Optionally tap **N / P / K** to enter the *Soil Health Card* rating. Each tap cycles `?` → Low → Med → High.
-4. Set the **area** with − / + (0.25 to 10 acres), then tap **Recommend fertilizer**.
-5. The result has four pages:
+3. Tap **Land: …** in the top bar to set the district where the land is (remembered).
+4. Optionally tap **N / P / K** to enter the *Soil Health Card* rating. Each tap cycles **Auto** → Low → Med → High. Auto means the district's typical value (see below).
+5. Set the **area** with − / + (0.25 to 10 acres), then tap **Recommend fertilizer**.
+6. The result has four pages:
    - **Total** urea / DAP / MOP for the area.
    - **When to apply**: each stage with its products.
    - **Field now**: live sensor conditions.
@@ -220,7 +223,23 @@ The physical button still works everywhere: tap returns to the dashboard, hold a
 | Maize (hybrid) | 150:75:75 | ¼ N + all P, K at sowing; ½ N at 25 days, ¼ at 45 days |
 | Onion (Bellary) | 100:150:75 | ½ N + all P, K at planting; ½ N at 30 days |
 
-- **Soil Health Card rating** (ICAR rule): low = dose +25 %, high = −25 %, medium or unknown = the general dose.
+- **Soil nutrient status**, for each of N, P and K:
+  1. The farmer's **Soil Health Card** value, if entered.
+  2. Otherwise the **district's typical status** from published soil surveys, marked `*` on screen with the source named on the *Why* page.
+  3. Otherwise the general dose.
+- **ICAR rule:** low = dose +25 %, high = −25 %, medium = the general dose.
+
+| District | N | P | K | Source |
+|---|---|---|---|---|
+| Bengaluru | medium | high | medium | Avinash et al. 2026, *Mysore J. Agric. Sci.* 60(2): farm-land means N 384, P₂O₅ 109, K₂O 258 kg/ha (read in the paper) |
+| Tumakuru | low | medium | medium | Bhattacharya & Chikkaramappa 2023, *Mysore J. Agric. Sci.* 57(2): means N 228, P₂O₅ 33.8, K₂O 211 kg/ha (read in the paper) |
+| Kolar | low | high | high | nutrient-index study of tomato soils (search excerpt) |
+| Hassan | medium | medium | low | geo-referenced fertility study (search excerpt) |
+| Belagavi | low | medium | high | GIS fertility mapping, 160 samples (search excerpt) |
+| Chikkaballapura | – | low | low | nutrient-index study; N not settled → general dose (search excerpt) |
+| Other | – | – | – | general dose |
+
+  District values are averages from soil surveys, not a test of the farmer's field. Kolar, Hassan, Belagavi and Chikkaballapura come from search excerpts of the papers, so verify them before relying on them. The default district is `KRISHI_REGION` in `.env` (`bengaluru`). Sources and URLs are in `server/fertilizer.py` (`REGIONS`).
 - **Products:** P comes from DAP (18-46-0), whose N counts towards that stage; the rest of the N is urea (46 %); K comes from MOP (60 %). Doses are converted per stage, for the selected area.
 - **Live sensors** don't measure N, P, K or pH, so they **never change the dose**. They give the field conditions (temperature, humidity, soil moisture if calibrated) and when to apply ("feel the soil, apply to moist soil, water lightly after").
 - **Not included:**
@@ -239,7 +258,7 @@ API: `GET /api/krishi/fertilizer/crops`; `POST /api/krishi/fertilizer {"crop","a
   - The PC renders those questions and answers itself (`kiosk_text.py`: HarfBuzz + the Windows *Nirmala UI* font, 18 px) and sends them as 1-bit bitmaps (`GQ:`/`GA:`/`GR:` lines).
   - Kanglish answers keep their English words. Up to 12 pages, turned while the answer is spoken.
   - If the libraries or font are missing, the screen falls back to Latin letters. Needs `uharfbuzz` and `freetype-py` (in `requirements.txt`).
-- **Watching the soil sensor (UNO Q) live**, from the PC:
+- **Soil sensor monitor**: `.\.venv\Scripts\python scripts\soil_monitor.py` streams one line per reading (raw value, change, what it means); `--last 30` shows recent readings. It works while the kiosk is running. The raw log, from the PC:
   `& "$env:LOCALAPPDATA\Arduino15\packages\arduino\tools\adb\32.0.0\adb.exe" shell arduino-app-cli app logs /home/arduino/ArduinoApps/smart-krishi-sensors --follow`
   (one line per reading: `soil_raw=…`, faults). Or open the app in App Lab: the sketch's own Serial Monitor lines also show the sample spread.
 - **Speaker loudness:** `KIOSK_LOUDNESS` (default 6, 0 = Campus Mithra's level). It is a soft limiter applied before the firmware's 2x gain.

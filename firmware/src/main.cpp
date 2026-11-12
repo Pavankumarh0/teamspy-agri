@@ -1063,7 +1063,7 @@ static void dashDrawFrame() {
   }
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(D_DIM, D_BG);
-  tft.drawString(touchReady ? "Button tap: chat  hold: ask" : "Touch: hold button at power-on", 312, 226, 1);
+  tft.drawString(touchReady ? "Button tap: chat  hold: ask" : "Press screen firmly to set up touch", 312, 226, 1);
   for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
   dotColour = 0;
   dashUpdate();
@@ -1622,12 +1622,19 @@ static const int MAX_CROPS = 6;
 static char cropId[MAX_CROPS][12], cropName[MAX_CROPS][14];
 static int  cropCount = 0, cropSel = -1;
 static uint8_t soilRating[3] = {0, 0, 0};             // N, P, K: 0 not known, 1 low, 2 medium, 3 high
-static const char *const RATING_TXT[4] = {"?", "Low", "Med", "High"};
+static const char *const RATING_TXT[4] = {"Auto", "Low", "Med", "High"};   // Auto = district / general
 static const char *const RATING_ID[4] = {"unknown", "low", "medium", "high"};
 static const float AREAS[] = {0.25f, 0.5f, 1, 1.5f, 2, 2.5f, 3, 4, 5, 10};
 static const int AREA_N = sizeof AREAS / sizeof AREAS[0];
 static int  areaIdx = 2;                              // 1 acre
 static uint32_t cropsAskedMs = 0;
+
+// District of the land (REGIONS: from the PC). Nutrients without a Soil Health
+// Card value are assumed from that district's soil surveys on the server.
+static const int MAX_REGIONS = 8;
+static char regionId[MAX_REGIONS][16], regionName[MAX_REGIONS][18];
+static int  regionCount = 0, regionSel = -1;
+static const Btn BTN_REGION = {150, 3, 166, 22};
 
 static const Btn BTN_BACK  = {4, 3, 70, 22};
 static const Btn BTN_RATE[3] = {{96, 138, 68, 28}, {170, 138, 68, 28}, {244, 138, 68, 28}};
@@ -1692,6 +1699,14 @@ static void drawArea() {
   tft.drawString(a, 204, 191, 2);
 }
 
+static void drawRegionBtn() {
+  char label[28];
+  if (regionSel >= 0) snprintf(label, sizeof label, "Land: %s", regionName[regionSel]);
+  else snprintf(label, sizeof label, "Land: ...");
+  const uint8_t font = tft.textWidth(label, 2) <= BTN_REGION.w - 8 ? 2 : 1;
+  drawBtn(BTN_REGION, label, D_CARD, D_TEXT, font);
+}
+
 static void drawGo() {
   const bool ok = cropSel >= 0;
   drawBtn(BTN_GO, ok ? "Recommend fertilizer >" : "Choose a crop first", ok ? D_LEAF : D_CARD, ok ? D_BAR : D_MUTE);
@@ -1699,7 +1714,8 @@ static void drawGo() {
 
 static void drawCropScreen() {
   tft.fillScreen(D_BG);
-  drawTopBar("Fertilizer: your crop");
+  drawTopBar("Fertilizer");
+  drawRegionBtn();
   drawCropButtons();
   drawRatings();
   drawArea();
@@ -1728,6 +1744,32 @@ static void parseCrops(char *body) {
   if (cropSel >= cropCount) cropSel = -1;
   Serial.printf("[esp] %d crops\n", cropCount);
   if (ui == UI_CROP) { drawCropButtons(); drawGo(); }
+}
+
+/* REGIONS:<default id>|id=Name;id=Name;... - the saved choice wins over the default. */
+static void parseRegions(char *body) {
+  char *bar = strchr(body, '|');
+  if (!bar) return;
+  *bar = '\0';
+  char def[16];
+  dashCopy(def, sizeof def, body);
+  regionCount = 0;
+  char *save = nullptr;
+  for (char *kv = strtok_r(bar + 1, ";", &save); kv && regionCount < MAX_REGIONS; kv = strtok_r(nullptr, ";", &save)) {
+    char *eq = strchr(kv, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    dashCopy(regionId[regionCount], sizeof regionId[0], kv);
+    dashCopy(regionName[regionCount], sizeof regionName[0], eq + 1);
+    regionCount++;
+  }
+  const String saved = prefs.getString("region", "");
+  regionSel = -1;
+  for (int i = 0; i < regionCount; i++) if (saved.length() && saved == regionId[i]) regionSel = i;
+  for (int i = 0; i < regionCount && regionSel < 0; i++) if (!strcmp(def, regionId[i])) regionSel = i;
+  if (regionSel < 0 && regionCount) regionSel = 0;
+  Serial.printf("[esp] %d regions, land in %s\n", regionCount, regionSel >= 0 ? regionId[regionSel] : "-");
+  if (ui == UI_CROP) drawRegionBtn();
 }
 
 // --- fertilizer result screen ----------------------------------------------------
@@ -1805,8 +1847,9 @@ static void requestFertilizer() {
   } else {
     frState = 1;
     frAskedMs = millis();
-    Serial.printf("FERT:crop=%s;area=%g;n=%s;p=%s;k=%s\n", cropId[cropSel], AREAS[areaIdx],
-                  RATING_ID[soilRating[0]], RATING_ID[soilRating[1]], RATING_ID[soilRating[2]]);
+    Serial.printf("FERT:crop=%s;area=%g;n=%s;p=%s;k=%s;region=%s\n", cropId[cropSel], AREAS[areaIdx],
+                  RATING_ID[soilRating[0]], RATING_ID[soilRating[1]], RATING_ID[soilRating[2]],
+                  regionSel >= 0 ? regionId[regionSel] : "");
   }
   enterFert();
 }
@@ -1856,6 +1899,12 @@ static void onTap(uint16_t x, uint16_t y) {
       break;
     case UI_CROP:
       if (hit(BTN_BACK, x, y)) { enterDash(); break; }
+      if (hit(BTN_REGION, x, y) && regionCount) {
+        regionSel = (regionSel + 1) % regionCount;
+        prefs.putString("region", regionId[regionSel]);
+        drawRegionBtn();
+        break;
+      }
       for (int i = 0; i < cropCount; i++)
         if (hit(cropBtn(i), x, y)) { cropSel = i; drawCropButtons(); drawGo(); return; }
       for (int i = 0; i < 3; i++)
@@ -1876,13 +1925,50 @@ static void onTap(uint16_t x, uint16_t y) {
 
 static bool touchHeld = false;
 static uint32_t lastTouchPollMs = 0, lastTapMs = 0;
+static uint8_t uncalPresses = 0;
+// Pressure that counts as a touch. Measured on this panel: 5-30 with nothing
+// touching it; the library default (600) needs a hard press on some panels.
+static const uint16_t TOUCH_Z_MIN = 350;
 
-/* Every 25 ms while idle: one tap per press (released between taps). */
-static void pollTouch() {
-  if (!touchReady || millis() - lastTouchPollMs < 25) return;
-  lastTouchPollMs = millis();
+/* TRAW:<n> - print n raw touch readings, to see whether the controller answers:
+   no touch -> z near 0; a finger -> z in the hundreds+ and x, y between ~200 and
+   ~3900; x or y stuck at 0 or 4095 -> nothing is answering (wiring, T_CS). */
+static void touchDiag(int n) {
+  for (int i = 0; i < n; i++) {
+    uint16_t x = 0, y = 0;
+    tft.getTouchRaw(&x, &y);
+    const uint16_t z = tft.getTouchRawZ();
+    Serial.printf("[esp] touch raw x=%u y=%u z=%u\n", x, y, z);
+    delay(100);
+  }
+}
+
+/* A real finger press on an uncalibrated screen: firm, and x, y inside the
+   panel's raw range (an absent controller reads 0 or 4095 there). */
+static bool rawPressLooksReal() {
   uint16_t x = 0, y = 0;
-  const bool down = tft.getTouch(&x, &y);
+  tft.getTouchRaw(&x, &y);
+  const uint16_t z = tft.getTouchRawZ();
+  return z > TOUCH_Z_MIN && z < 4000 && x > 150 && x < 3950 && y > 150 && y < 3950;
+}
+
+/* Every 25 ms while idle: one tap per press (released between taps). Before
+   calibration, a firm press held for ~0.3 s starts the calibration. */
+static void pollTouch() {
+  if (millis() - lastTouchPollMs < 25) return;
+  lastTouchPollMs = millis();
+  if (!touchReady) {
+    uncalPresses = rawPressLooksReal() ? uncalPresses + 1 : 0;
+    if (uncalPresses >= 12) {
+      uncalPresses = 0;
+      Serial.println(F("[esp] touch pressed on an uncalibrated screen - calibrating"));
+      touchCalibrate();
+      enterDash();
+    }
+    return;
+  }
+  uint16_t x = 0, y = 0;
+  const bool down = tft.getTouch(&x, &y, TOUCH_Z_MIN);
   if (down && !touchHeld) {
     touchHeld = true;
     if (millis() - lastTapMs > 150) { lastTapMs = millis(); onTap(x, y); }
@@ -1929,7 +2015,9 @@ static void handleLine(char *line) {
   if (strcmp(line, "PING") == 0) { Serial.println(F("PONG")); return; }
   if (handleFertLine(line)) return;                                       // FRB/FRT/FRL/FRE/FRX
   if (strncmp(line, "CROPS:", 6) == 0) { parseCrops(line + 6); return; }
+  if (strncmp(line, "REGIONS:", 8) == 0) { parseRegions(line + 8); return; }
   if (strcmp(line, "TCAL") == 0) { touchCalibrate(); enterDash(); return; }
+  if (strncmp(line, "TRAW:", 5) == 0) { touchDiag(constrain(atoi(line + 5), 1, 100)); return; }
   if (strncmp(line, "TOUCH:", 6) == 0) {                                 // test: a tap at x,y
     unsigned x = 0, y = 0;
     if (sscanf(line + 6, "%u,%u", &x, &y) == 2) onTap((uint16_t)x, (uint16_t)y);
@@ -2173,7 +2261,7 @@ void setup() {
   Serial.printf("[esp] button GPIO%d: tap (<%d ms) = dashboard/chat, hold = talk; debounce %d ms\n",
                 BTN_TALK, REC_MIN_MS, BTN_DEBOUNCE_MS);
   Serial.printf("[esp] touch XPT2046 CS=%d (IRQ unused): %s\n", TOUCH_CS,
-                touchReady ? "calibrated" : "NOT calibrated - hold the button at power-on, or send TCAL");
+                touchReady ? "calibrated" : "NOT calibrated - press the screen firmly to start calibration");
   Serial.println(F("[esp] screen: dashboard"));
   rfidBegin(onRfidCardDetected);
   Serial.println(F("[esp] ready"));

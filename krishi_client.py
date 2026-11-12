@@ -978,9 +978,13 @@ def kiosk_crops(server, esp):
     """CROPS? from the touch screen -> the server's crop list."""
     import httpx
     try:
-        crops = httpx.get(f"{server}/api/krishi/fertilizer/crops", timeout=10).json()["crops"]
+        data = httpx.get(f"{server}/api/krishi/fertilizer/crops", timeout=10).json()
+        crops, regions = data["crops"], data.get("regions", [])
         esp._send("CROPS:" + ";".join(f"{c['id']}={c['name']}" for c in crops))
-        print(f"  touch screen: crop list sent ({len(crops)} crops)")
+        if regions:
+            esp._send(f"REGIONS:{data.get('default_region', 'other')}|" +
+                      ";".join(f"{r['id']}={r['name']}" for r in regions))
+        print(f"  touch screen: {len(crops)} crops, {len(regions)} districts sent")
     except Exception as exc:
         print(f"  touch screen: crop list failed: {exc}")
 
@@ -992,7 +996,8 @@ def kiosk_fertilizer(server, esp, line):
     f = dict(kv.split("=", 1) for kv in line[5:].split(";") if "=" in kv)
     try:
         body = {"crop": f.get("crop", ""), "area_acres": float(f.get("area", "1")),
-                "n": f.get("n", "unknown"), "p": f.get("p", "unknown"), "k": f.get("k", "unknown")}
+                "n": f.get("n", "unknown"), "p": f.get("p", "unknown"), "k": f.get("k", "unknown"),
+                "region": f.get("region") or None}
         r = httpx.post(f"{server}/api/krishi/fertilizer", json=body, timeout=20)
         r.raise_for_status()
         rec = r.json()
@@ -1007,7 +1012,7 @@ def kiosk_fertilizer(server, esp, line):
     for ln in lines + ["FRE"]:
         esp._send(ln)
     t = rec["totals"]
-    print(f"  fertilizer: {rec['name']} {rec['area_acres']} acre, soil card {rec['ratings']} -> "
+    print(f"  fertilizer: {rec['name']} {rec['area_acres']} acre, {rec['region']['name']}, soil {rec['ratings']} from {rec['rating_from']} -> "
           f"urea {t['urea_kg']} kg, DAP {t['dap_kg']} kg, MOP {t['mop_kg']} kg  ({rec['source']['crop']})")
 
 

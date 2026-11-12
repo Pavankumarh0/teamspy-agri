@@ -52,6 +52,43 @@ class FertilizerTests(unittest.TestCase):
         n, _, _ = nutrients(r["stages"])
         self.assertAlmostEqual(n, r["dose_for_area_kg"]["N"], delta=1.5)
 
+    def test_regions_are_sourced_and_valid(self):
+        for rid, r in f.REGIONS.items():
+            self.assertTrue(r.source, rid)
+            for v in (r.n, r.p, r.k):
+                self.assertIn(v, (None, "low", "medium", "high"), rid)
+            if rid != "other":
+                self.assertTrue(r.url.startswith("https://"), rid)
+
+    def test_district_fills_in_missing_soil_card_values(self):
+        r = f.recommend("tomato", 1, region="bengaluru")               # N medium, P high, K medium
+        self.assertEqual(r["rating_from"], {"N": "district", "P": "district", "K": "district"})
+        self.assertEqual(r["dose_kg_ha"], {"N": 150.0, "P": 75.0, "K": 50.0})
+        r = f.recommend("tomato", 1, region="tumakuru")                # N low
+        self.assertEqual(r["dose_kg_ha"]["N"], 187.5)
+        self.assertTrue(any("Tumakuru soil surveys (assumed)" in w for w in r["why"]))
+
+    def test_soil_card_beats_the_district(self):
+        r = f.recommend("tomato", 1, n="high", region="tumakuru")      # district says N low
+        self.assertEqual(r["ratings"]["N"], "high")
+        self.assertEqual(r["rating_from"]["N"], "soil card")
+        self.assertEqual(r["dose_kg_ha"]["N"], 112.5)
+
+    def test_unsettled_district_nutrient_gets_the_general_dose(self):
+        r = f.recommend("tomato", 1, region="chikkaballapura")          # N not settled by the survey
+        self.assertEqual(r["rating_from"]["N"], "general")
+        self.assertEqual(r["dose_kg_ha"]["N"], 150.0)
+
+    def test_screen_marks_assumed_values(self):
+        _, pages = f.screen_pages(f.recommend("ragi", 1, region="kolar"))
+        text = " ".join(t for _, t in pages[0])
+        self.assertIn("N:low*", text)
+        self.assertIn("assumed from Kolar", text)
+
+    def test_unknown_region_rejected(self):
+        with self.assertRaises(ValueError):
+            f.recommend("tomato", 1, region="atlantis")
+
     def test_bad_rating_rejected(self):
         with self.assertRaises(ValueError):
             f.recommend("tomato", 1, n="very low")
@@ -110,6 +147,15 @@ class FertilizerApiTests(unittest.TestCase):
         self.assertEqual(self.c.post("/api/krishi/fertilizer", json={"crop": "banana", "area_acres": 1}).status_code, 404)
         self.assertEqual(self.c.post("/api/krishi/fertilizer", json={"crop": "tomato", "area_acres": 0}).status_code, 422)
         self.assertEqual(self.c.post("/api/krishi/fertilizer", json={"crop": "tomato", "area_acres": 1, "n": "lots"}).status_code, 422)
+
+    def test_region_through_the_api(self):
+        crops = self.c.get("/api/krishi/fertilizer/crops").json()
+        self.assertIn("bengaluru", [r["id"] for r in crops["regions"]])
+        body = self.c.post("/api/krishi/fertilizer", json={"crop": "tomato", "area_acres": 1, "region": "bengaluru"}).json()
+        self.assertEqual(body["region"]["name"], "Bengaluru")
+        self.assertEqual(body["dose_kg_ha"]["P"], 75.0)
+        self.assertEqual(self.c.post("/api/krishi/fertilizer",
+                                     json={"crop": "tomato", "area_acres": 1, "region": "atlantis"}).status_code, 404)
 
 
 if __name__ == "__main__":

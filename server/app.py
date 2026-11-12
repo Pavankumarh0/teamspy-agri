@@ -396,12 +396,21 @@ class FertilizerRequest(BaseModel):
     n: Literal["low", "medium", "high", "unknown"] = "unknown"
     p: Literal["low", "medium", "high", "unknown"] = "unknown"
     k: Literal["low", "medium", "high", "unknown"] = "unknown"
+    region: str | None = Field(default=None, max_length=24)      # district of the land; None = KRISHI_REGION
+
+
+def default_region() -> str:
+    r = os.getenv("KRISHI_REGION", fertilizer.DEFAULT_REGION).strip().lower()
+    return r if r in fertilizer.REGIONS else fertilizer.DEFAULT_REGION
 
 
 @api.get("/fertilizer/crops")
 async def fertilizer_crops():
     """Crops the kiosk's crop screen offers (one source of truth: fertilizer.CROPS)."""
     return {"crops": [{"id": cid, "name": c.name, "note": c.note} for cid, c in fertilizer.CROPS.items()],
+            "regions": [{"id": rid, "name": r.name, "n": r.n, "p": r.p, "k": r.k, "source": r.source}
+                        for rid, r in fertilizer.REGIONS.items()],
+            "default_region": default_region(),
             "areas_acres": fertilizer.AREAS, "ratings": list(fertilizer.RATING_FACTOR)}
 
 
@@ -411,10 +420,14 @@ async def fertilizer_recommend(body: FertilizerRequest):
     with the live sensor conditions; plus the pages the kiosk TFT shows."""
     if body.crop not in fertilizer.CROPS:
         raise HTTPException(status_code=404, detail=f"Unknown crop '{body.crop}'.")
+    region = (body.region or default_region()).lower()
+    if region not in fertilizer.REGIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown region '{region}'.")
     rec = sensors.latest()
-    out = fertilizer.recommend(body.crop, body.area_acres, body.n, body.p, body.k, rec, sensors.status(rec))
+    out = fertilizer.recommend(body.crop, body.area_acres, body.n, body.p, body.k, rec, sensors.status(rec), region)
     title, pages = fertilizer.screen_pages(out)
-    log.info("fertilizer: %s %.2f acre N=%s P=%s K=%s -> %s", body.crop, body.area_acres, body.n, body.p, body.k, out["totals"])
+    log.info("fertilizer: %s %.2f acre region=%s ratings=%s (%s) -> %s", body.crop, body.area_acres, region,
+             out["ratings"], out["rating_from"], out["totals"])
     return {**out, "screen": {"title": title, "pages": [[{"style": s, "text": t} for s, t in pg] for pg in pages]}}
 
 

@@ -104,6 +104,57 @@ CROPS: dict[str, Crop] = {
 AREAS = [0.25, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 10]       # acres the touch screen offers
 
 
+@dataclass
+class Region:
+    name: str
+    n: str | None            # typical status of the district's farm soils; None = not settled by the survey
+    p: str | None
+    k: str | None
+    source: str
+    url: str
+    verified: bool           # True: read in the paper itself; False: from a search excerpt of it
+
+
+# Typical soil nutrient status by district, from published soil surveys, used
+# ONLY for nutrients the farmer has no Soil Health Card value for. Categories
+# follow the usual Indian soil-test limits (available N low < 280, medium
+# 280-560 kg/ha; P2O5 medium ~23-56, high > 56; K2O medium 141-336 kg/ha). A
+# district survey is an average: a soil test of the field is always better.
+REGIONS: dict[str, Region] = {
+    "bengaluru": Region(
+        "Bengaluru", "medium", "high", "medium",
+        "Avinash et al. 2026, Mysore J. Agric. Sci. 60(2): 11-23 (UAS-B, ICAR-NBSS&LUP). Agricultural land "
+        "in the northern transect of Bengaluru: available N 384, P2O5 109, K2O 258 kg/ha",
+        "https://www.uasbangalore.edu.in/wp-content/uploads/2026/06/2.-Avinash.pdf", True),
+    "tumakuru": Region(
+        "Tumakuru", "low", "medium", "medium",
+        "Bhattacharya & Chikkaramappa 2023, Mysore J. Agric. Sci. 57(2): 327-339. Appanahalli sub-watershed, "
+        "Gubbi taluk, 180 samples: mean available N 228, P2O5 33.8, K2O 211 kg/ha",
+        "https://mail.uasbangalore.edu.in/images/2023-2nd-Issue/36.pdf", True),
+    "kolar": Region(
+        "Kolar", "low", "high", "high",
+        "Nutrient index study of tomato-growing soils of Kolar: N 1.19 (low), P 2.65 (high), K 2.71 (high)",
+        "https://krishi.icar.gov.in/jspui/bitstream/123456789/56296/1/Int.J%20plant%20%26%20Soil%20science-Tomato.pdf", False),
+    "hassan": Region(
+        "Hassan", "medium", "medium", "low",
+        "Geo-referenced soil fertility study of Hassan district: N medium in 86 %, P medium in 92.8 %, "
+        "K low in 67.2 % of samples",
+        "https://www.researchgate.net/publication/319617809", False),
+    "belagavi": Region(
+        "Belagavi", "low", "medium", "high",
+        "GIS soil fertility mapping, Belgaum district, 160 samples: N low in 79.4 %, P medium in 71.9 %, "
+        "K high in 50 %",
+        "https://www.researchgate.net/publication/280554499", False),
+    "chikkaballapura": Region(
+        "Chikkaballapura", None, "low", "low",
+        "Nutrient index study of farmers' fields, Chikkaballapura district: P low in 50 %, K low in 86.1 % "
+        "of samples (N not clearly settled)",
+        "https://www.researchgate.net/publication/376993455", False),
+    "other": Region("Other district", None, None, None, "No district survey used: general recommended dose", "", True),
+}
+DEFAULT_REGION = "other"
+
+
 def _kg(x: float) -> float:
     return round(x) if x >= 10 else round(x * 2) / 2      # whole kg, or 0.5 kg for small amounts
 
@@ -113,12 +164,25 @@ def _fmt(x: float) -> str:
 
 
 def recommend(crop_id: str, area_acres: float, n: str = "unknown", p: str = "unknown", k: str = "unknown",
-              sensor: dict | None = None, sensor_status: str = "no_data") -> dict:
+              sensor: dict | None = None, sensor_status: str = "no_data", region: str = DEFAULT_REGION) -> dict:
+    """Soil Health Card ratings win; a nutrient without one takes the district's
+    typical status (REGIONS); without either it gets the general dose."""
     crop = CROPS[crop_id]
-    ratings = {"N": n, "P": p, "K": k}
-    for r in ratings.values():
+    reg = REGIONS.get(region)
+    if reg is None:
+        raise ValueError(f"unknown region '{region}'")
+    card = {"N": n, "P": p, "K": k}
+    for r in card.values():
         if r not in RATING_FACTOR:
             raise ValueError(f"rating must be one of {', '.join(RATING_FACTOR)}")
+    ratings, rating_from = {}, {}
+    for x, regional in (("N", reg.n), ("P", reg.p), ("K", reg.k)):
+        if card[x] != "unknown":
+            ratings[x], rating_from[x] = card[x], "soil card"
+        elif regional:
+            ratings[x], rating_from[x] = regional, "district"
+        else:
+            ratings[x], rating_from[x] = "unknown", "general"
     ha = area_acres * ACRE_HA
     base = dict(zip("NPK", crop.npk))
     dose = {x: base[x] * RATING_FACTOR[ratings[x]] for x in "NPK"}          # kg/ha after the soil test rule
@@ -142,19 +206,26 @@ def recommend(crop_id: str, area_acres: float, n: str = "unknown", p: str = "unk
 
     why = []
     for x, name in (("N", "nitrogen"), ("P", "phosphorus"), ("K", "potassium")):
-        r = ratings[x]
+        r, src = ratings[x], rating_from[x]
+        who = "Soil card" if src == "soil card" else f"{reg.name} soil surveys (assumed)"
         if r == "low":
-            why.append(f"Soil card: {name} low, so {name} is 25% above the general dose.")
+            why.append(f"{who}: {name} low, so {name} is 25% above the general dose.")
         elif r == "high":
-            why.append(f"Soil card: {name} high, so {name} is 25% below the general dose.")
-    if all(r == "unknown" for r in ratings.values()):
-        why.append("No soil card values entered: this is the general dose. A soil test can lower your cost.")
+            why.append(f"{who}: {name} high, so {name} is 25% below the general dose.")
+        elif src == "district":
+            why.append(f"{who}: {name} medium, so the general {name} dose.")
+    if "district" in rating_from.values():
+        why.append("District values are averages, not your field: a Soil Health Card test is better.")
+    elif all(v == "general" for v in rating_from.values()):
+        why.append("No soil card values or district data: this is the general dose. A soil test can lower your cost.")
     why.append("Nitrogen is split because it is easily lost; P and K are needed early by the roots.")
 
     field = conditions(sensor, sensor_status)
     return {
         "crop": crop_id, "name": crop.name, "note": crop.note, "area_acres": area_acres,
-        "ratings": ratings, "base_kg_ha": base, "dose_kg_ha": {x: round(v, 1) for x, v in dose.items()},
+        "ratings": ratings, "rating_from": rating_from,
+        "region": {"id": region, "name": reg.name, "source": reg.source, "url": reg.url, "verified": reg.verified},
+        "base_kg_ha": base, "dose_kg_ha": {x: round(v, 1) for x, v in dose.items()},
         "dose_for_area_kg": {x: round(v * ha, 1) for x, v in dose.items()},
         "totals": totals, "stages": stages, "extras": extras, "why": why, "field": field,
         "source": {"crop": crop.source, "crop_url": crop.url, "soil_test": SOIL_TEST_SOURCE, "soil_test_url": SOIL_TEST_URL},
@@ -186,14 +257,17 @@ def screen_pages(rec: dict) -> tuple[str, list[list[tuple[str, str]]]]:
     Styles: H heading, V big value, T text, W warning, S small."""
     ar = rec["area_acres"]
     title = f"{rec['name']} - {_fmt(ar)} acre{'s' if ar != 1 else ''}"
-    rt = rec["ratings"]
-    card = "  ".join(f"{x}:{'?' if rt[x] == 'unknown' else rt[x]}" for x in "NPK")
+    rt, rf = rec["ratings"], rec["rating_from"]
+    short = {"low": "low", "medium": "med", "high": "high", "unknown": "?"}
+    soil = "  ".join(f"{x}:{short[rt[x]]}{'*' if rf[x] == 'district' else ''}" for x in "NPK")
     t = rec["totals"]
-    p1 = [("H", f"Total for the season  (soil card {card})")]
+    p1 = [("H", f"Total for the season   soil {soil}")]
     for label, key in (("Urea", "urea_kg"), ("DAP", "dap_kg"), ("MOP", "mop_kg")):
         p1.append(("V", f"{label}  {_fmt(t[key])} kg"))
     d = rec["dose_for_area_kg"]
     p1.append(("T", f"= N {_fmt(d['N'])}, P2O5 {_fmt(d['P'])}, K2O {_fmt(d['K'])} kg"))
+    if "district" in rf.values():
+        p1.append(("S", f"* assumed from {rec['region']['name']} district soil surveys"))
     p1.append(("S", f"{rec['note']}. Source: {rec['source']['crop']}"))
     p2 = [("H", "When to apply")]
     for s in rec["stages"]:
