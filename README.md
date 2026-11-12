@@ -280,6 +280,23 @@ The language screen's own words are built into the firmware (`firmware/include/l
 
 **Correcting a translation:** add or edit the English → Kannada/Hindi pair in `server/ui_overrides.json` (use `{0}` for numbers), then restart the server. Alternatively, delete the entry in `server/data/ui_translations.json` to have it re-translated. Machine translation gets short phrases mostly right, but not always: "When to apply" first came back as "when to submit an application" and is now overridden. **Have a Kannada and a Hindi speaker read through the screens.**
 
+## Weather and rain alert
+
+**Source:** OpenWeatherMap, using `WEATHER_API_KEY` in `.env`.
+- Weather is fetched for the farm's district (`KRISHI_REGION`, or `KRISHI_LAT` / `KRISHI_LON`) and cached for 10 minutes. Endpoint: `GET /api/krishi/weather`.
+
+**The dashboard's weather strip** shows an icon, the temperature and a rain message:
+- **red** when it is raining now, or rain is likely (≥ 50 % in the next 12 h);
+- **amber** when rain is possible (≥ 30 %).
+
+When a rain alert starts, the kiosk **chimes twice**. Rain also reaches:
+- the fertilizer result: "wait to apply urea until the rain has passed, because rain can wash nitrogen away";
+- the chatbot: questions about weather or rain get the forecast as live data.
+
+## Farmer feedback (stars)
+
+After the result pages, **Rate >** opens **5 stars**. The farmer touches one, the rating is saved with the crop, area, district and doses (`POST /api/krishi/feedback` → `server/data/feedback.jsonl`), a thank-you shows, and the kiosk returns to the dashboard. `GET /api/krishi/feedback/summary` gives the count and average stars, per crop.
+
 ## Why a fertilizer is recommended
 
 The result has 5 pages: totals → **Why these fertilizers** → when to apply → why this amount → field now.

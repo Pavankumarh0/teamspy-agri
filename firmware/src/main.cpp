@@ -1129,10 +1129,13 @@ static struct {
   long age;                  // seconds since the server got the reading, when sent (-1 none)
   uint32_t rxMs;             // when the D: line arrived
   char st[10], t[10], h[10], sr[10], sp[10], mq[10], dev[26];
+  char wt[8], wc[14], wm[64];      // weather: temperature, condition, rain message
+  int  wa;                         // rain alert: 0 none, 1 possible, 2 likely, 3 raining
 } dd;
+static int rainAlertShown = 0;
 
-struct DField { char txt[40]; uint16_t fg; bool drawn; };
-enum { F_V0, F_V1, F_V2, F_S0, F_S1, F_S2, F_SENSOR, F_LINK, F_AGE, F_COUNT };
+struct DField { char txt[80]; uint16_t fg; bool drawn; };
+enum { F_V0, F_V1, F_V2, F_S0, F_S1, F_S2, F_SENSOR, F_LINK, F_AGE, F_WEATHER, F_COUNT };
 static DField dfields[F_COUNT];
 static uint16_t dotColour = 0;
 static uint32_t lastDashTickMs = 0;
@@ -1140,9 +1143,10 @@ static uint32_t lastDashTickMs = 0;
 // Temperature and humidity side by side; soil moisture full width below,
 // with a bar. (The MQ-135 air-quality card was removed from the dashboard.)
 static const int CARDS = 3;
-static const int16_t CARD_H = 74;
+static const int16_t CARD_H = 58;
 static const int16_t CARD_X[CARDS] = {8, 164, 8};
-static const int16_t CARD_Y[CARDS] = {38, 38, 118};
+static const int16_t CARD_Y[CARDS] = {34, 34, 96};
+static const int16_t WX_Y = 158, WX_H = 34;           // weather strip under the cards
 static const int16_t CARD_WS[CARDS] = {148, 148, 304};
 static const char *const CARD_LABEL[CARDS] = {"Temperature", "Humidity", "Soil moisture"};
 static int barShown = -2;                     // moisture bar cache (-1 = empty bar)
@@ -1178,6 +1182,10 @@ static void parseDash(char *body) {
     else if (!strcmp(k, "mv")) dd.mv = v[0] == '1';
     else if (!strcmp(k, "td")) dd.td = v[0] == '1';
     else if (!strcmp(k, "srv")) dd.srvOk = !strcmp(v, "ok");
+    else if (!strcmp(k, "wt")) dashCopy(dd.wt, sizeof dd.wt, v);
+    else if (!strcmp(k, "wc")) dashCopy(dd.wc, sizeof dd.wc, v);
+    else if (!strcmp(k, "wm")) dashCopy(dd.wm, sizeof dd.wm, v);
+    else if (!strcmp(k, "wa")) dd.wa = atoi(v);
   }
 }
 
@@ -1207,8 +1215,8 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   dashCopy(f.txt, sizeof f.txt, key);
   f.fg = fg;
   f.drawn = true;
-  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 26, w = i == 2 ? 140 : CARD_WS[i] - 20;
-  tft.fillRect(x, y, w, 28, D_CARD);
+  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 20, w = i == 2 ? 140 : CARD_WS[i] - 20;
+  tft.fillRect(x, y, w, 26, D_CARD);
   const uint8_t font = tft.textWidth(value, 4) + 30 <= w ? 4 : 2;     // "Not calibrated" uses font 2
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(fg, D_CARD);
@@ -1229,7 +1237,7 @@ static void dashBar(int pct, uint16_t colour) {
   if (pct == barShown && colour == barColour) return;
   barShown = pct;
   barColour = colour;
-  const int16_t bx = CARD_X[2] + 160, by = CARD_Y[2] + 30, bw = 130, bh = 18;
+  const int16_t bx = CARD_X[2] + 160, by = CARD_Y[2] + 22, bw = 130, bh = 16;
   tft.fillRoundRect(bx, by, bw, bh, 4, D_BAR);
   tft.drawRoundRect(bx, by, bw, bh, 4, D_MUTE);
   if (pct > 0) tft.fillRoundRect(bx + 2, by + 2, (int16_t)((bw - 4) * pct / 100), bh - 4, 3, colour);
@@ -1241,8 +1249,61 @@ static void dashBar(int pct, uint16_t colour) {
   uiDraw("wet", bx + bw, by + bh + 3, 1, 60);
 }
 
+/* Weather strip: icon, temperature and the rain message; amber / red on a rain alert. */
+static void drawWeatherIcon(int16_t cx, int16_t cy, const char *cond, uint16_t bg) {
+  tft.fillRect(cx - 14, cy - 13, 30, 27, bg);
+  const bool rain = !strcmp(cond, "Rain") || !strcmp(cond, "Drizzle") || !strcmp(cond, "Thunderstorm");
+  if (!strcmp(cond, "Clear")) {
+    tft.fillCircle(cx, cy, 7, D_WARN);
+    for (int a = 0; a < 8; a++) {
+      const float r = a * 0.785f;
+      tft.drawLine(cx + cosf(r) * 10, cy + sinf(r) * 10, cx + cosf(r) * 13, cy + sinf(r) * 13, D_WARN);
+    }
+    return;
+  }
+  tft.fillCircle(cx - 5, cy - 1, 6, D_MUTE);           // a cloud
+  tft.fillCircle(cx + 3, cy - 4, 8, D_MUTE);
+  tft.fillRoundRect(cx - 11, cy, 24, 8, 4, D_MUTE);
+  if (rain)
+    for (int d = 0; d < 3; d++) tft.drawLine(cx - 6 + d * 6, cy + 10, cx - 8 + d * 6, cy + 13, 0x5D1F);
+}
+
+static void dashWeather() {
+  char key[sizeof(dd.wm) + 32];
+  snprintf(key, sizeof key, "%s|%s|%d|%s", dd.wt, dd.wc, dd.wa, dd.wm);
+  DField &f = dfields[F_WEATHER];
+  if (f.drawn && strncmp(f.txt, key, sizeof f.txt - 1) == 0) return;
+  dashCopy(f.txt, sizeof f.txt, key);
+  f.drawn = true;
+  const uint16_t bg = dd.wa >= 2 ? D_BAD : dd.wa == 1 ? D_WARN : D_CARD;
+  const uint16_t fg = dd.wa >= 1 ? D_BAR : D_TEXT;
+  tft.fillRoundRect(8, WX_Y, 304, WX_H, 8, bg);
+  const int16_t cy = WX_Y + WX_H / 2;
+  if (!dd.wm[0]) {
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(D_MUTE, bg);
+    uiOrigin = F_WEATHER;
+    uiDraw("Weather: waiting for data", 18, cy, 2, 280);
+    uiOrigin = -1;
+    return;
+  }
+  drawWeatherIcon(26, cy, dd.wc, bg);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(fg, bg);
+  int16_t x = 46;
+  if (dd.wt[0]) {
+    x += tft.drawString(dd.wt, x, cy, 2);
+    tft.drawCircle(x + 3, cy - 5, 2, fg);
+    tft.drawString("C", x + 7, cy, 2);
+    x += 22;
+  }
+  uiOrigin = F_WEATHER;
+  uiDraw(dd.wm, x, cy, 2, 312 - x);
+  uiOrigin = -1;
+}
+
 static void dashSub(int i, const char *txt, uint16_t fg) {
-  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 56, CARD_WS[i] - 20, 12, CARD_X[i] + 10, CARD_Y[i] + 57,
+  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 46, i == 2 ? 140 : CARD_WS[i] - 20, 11, CARD_X[i] + 10, CARD_Y[i] + 47,
             TL_DATUM, 1, txt, fg, D_CARD);
 }
 
@@ -1280,6 +1341,8 @@ static void dashUpdate() {
     dashSub(2, dd.have ? "no valid reading" : "waiting for data", D_MUTE);
     dashBar(-1, D_DIM);
   }
+
+  dashWeather();
 
   // --- status line 1: the sensor device, and the PC / server link ---
   const char *sensorTxt;
@@ -2081,6 +2144,36 @@ static char frError[96] = "";
 static uint32_t frAskedMs = 0;
 static const Btn BTN_PREV = {8, 210, 100, 26};
 static const Btn BTN_NEXT = {212, 210, 100, 26};
+// The page after the last one asks for a 1-5 star rating (FB:<n> to the PC).
+static int fbStars = 0;
+static uint32_t fbAtMs = 0;
+
+static Btn starBtn(int i) { return {(int16_t)(12 + i * 60), 92, 56, 56}; }
+
+static void drawStar(int16_t cx, int16_t cy, int16_t r, bool filled) {
+  int16_t px[10], py[10];
+  for (int k = 0; k < 10; k++) {
+    const float a = -1.5708f + k * 0.62832f;            // 36 degrees apart, first point up
+    const float rr = (k % 2) ? r * 0.42f : r;
+    px[k] = cx + (int16_t)(cosf(a) * rr);
+    py[k] = cy + (int16_t)(sinf(a) * rr);
+  }
+  const uint16_t fill = filled ? D_WARN : D_CARD, edge = filled ? D_WARN : D_MUTE;
+  for (int k = 0; k < 10; k++) tft.fillTriangle(cx, cy, px[k], py[k], px[(k + 1) % 10], py[(k + 1) % 10], fill);
+  for (int k = 0; k < 10; k++) tft.drawLine(px[k], py[k], px[(k + 1) % 10], py[(k + 1) % 10], edge);
+}
+
+static void drawFeedbackPage() {
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(D_TEXT, D_BG);
+  uiDraw("How useful was this advice?", 160, 58, 2, 300);
+  for (int i = 0; i < 5; i++) {
+    const Btn b = starBtn(i);
+    drawStar(b.x + b.w / 2, b.y + b.h / 2, 25, i < fbStars);
+  }
+  tft.setTextColor(fbStars ? D_LEAF : D_MUTE, D_BG);
+  uiDraw(fbStars ? "Thank you for your feedback!" : "Touch a star to rate it", 160, 172, 2, 300);
+}
 
 /* Draws `text` word-wrapped from y; returns the y below it (stops at maxY). */
 static int16_t drawWrapped(const char *text, uint8_t font, uint16_t fg, int16_t y, int16_t maxY) {
@@ -2090,7 +2183,7 @@ static int16_t drawWrapped(const char *text, uint8_t font, uint16_t fg, int16_t 
 static void drawFertScreen() {
   tft.fillScreen(D_BG);
   char right[8] = "";
-  if (frState == 2 && frPages > 1) snprintf(right, sizeof right, "%d/%d", frPage + 1, frPages);
+  if (frState == 2 && frPage < frPages) snprintf(right, sizeof right, "%d/%d", frPage + 1, frPages);
   drawTopBar(frState == 2 ? frTitle : "Fertilizer", right);
   tft.setTextDatum(MC_DATUM);
   if (frState == 1) {
@@ -2103,8 +2196,13 @@ static void drawFertScreen() {
     drawWrapped(frError[0] ? frError : "No recommendation yet.", 2, D_WARN, 60, 200);
     return;
   }
+  if (frPage >= frPages) {                         // the rating page
+    drawFeedbackPage();
+    drawBtn(BTN_PREV, "< Prev", D_CARD, D_TEXT);
+    return;
+  }
   int16_t y = 36;
-  const int16_t maxY = frPages > 1 ? 206 : 236;
+  const int16_t maxY = 206;
   for (int i = 0; i < frCount && y < maxY; i++) {
     const FLine &l = frLines[i];
     if (l.page != frPage) continue;
@@ -2116,10 +2214,8 @@ static void drawFertScreen() {
       default:  y = drawWrapped(l.text, 2, D_TEXT, y, maxY); break;
     }
   }
-  if (frPages > 1) {
-    drawBtn(BTN_PREV, "< Prev", frPage > 0 ? D_CARD : D_BG, frPage > 0 ? D_TEXT : D_DIM);
-    drawBtn(BTN_NEXT, "Next >", frPage < frPages - 1 ? D_LEAF : D_BG, frPage < frPages - 1 ? D_BAR : D_DIM);
-  }
+  drawBtn(BTN_PREV, "< Prev", frPage > 0 ? D_CARD : D_BG, frPage > 0 ? D_TEXT : D_DIM);
+  drawBtn(BTN_NEXT, frPage < frPages - 1 ? "Next >" : "Rate >", D_LEAF, D_BAR);
 }
 
 static void enterFert() {
@@ -2145,7 +2241,7 @@ static void requestFertilizer() {
 
 /* FRB:<pages>, FRT:<title>, FRL:<page>|<style>|<text>, FRE (done), FRX:<error>. */
 static bool handleFertLine(char *line) {
-  if (strncmp(line, "FRB:", 4) == 0) { frCount = 0; frPages = atoi(line + 4); frTitle[0] = '\0'; return true; }
+  if (strncmp(line, "FRB:", 4) == 0) { frCount = 0; frPages = atoi(line + 4); frTitle[0] = '\0'; fbStars = 0; return true; }
   if (strncmp(line, "FRT:", 4) == 0) { dashCopy(frTitle, sizeof frTitle, line + 4); return true; }
   if (strncmp(line, "FRL:", 4) == 0) {
     char *a = line + 4, *b = strchr(a, '|');
@@ -2310,9 +2406,20 @@ static void onTap(uint16_t x, uint16_t y) {
       break;
     case UI_FERT:
       if (hit(BTN_BACK, x, y)) { enterCrop(); break; }
-      if (frState == 2 && frPages > 1) {
+      if (frState == 2) {
         if (hit(BTN_PREV, x, y) && frPage > 0) { frPage--; drawFertScreen(); }
-        else if (hit(BTN_NEXT, x, y) && frPage < frPages - 1) { frPage++; drawFertScreen(); }
+        else if (frPage < frPages && hit(BTN_NEXT, x, y)) { frPage++; drawFertScreen(); }   // last -> rating
+        else if (frPage >= frPages && !fbStars) {
+          for (int i = 0; i < 5; i++) {
+            if (hit(starBtn(i), x, y)) {
+              fbStars = i + 1;
+              fbAtMs = millis();
+              Serial.printf("FB:%d\n", fbStars);
+              drawFertScreen();
+              break;
+            }
+          }
+        }
       }
       break;
   }
@@ -2389,6 +2496,10 @@ static void fertTick() {
     Serial.println(F("CROPS?"));
     cropsAskedMs = millis();
   }
+  if (ui == UI_FERT && fbStars && frPage >= frPages && millis() - fbAtMs > 3000) {
+    enterDash();                                   // rated: back to the dashboard
+    return;
+  }
   if (ui == UI_FERT && frState == 1 && millis() - frAskedMs > 20000) {
     frState = 3;
     strcpy(frError, "No answer from the PC app. Check that start.ps1 is running, then try again.");
@@ -2440,6 +2551,13 @@ static void handleLine(char *line) {
   if (strncmp(line, "GA:", 3) == 0) { gfxBegin(2, line + 3); return; }
   if (strncmp(line, "D:", 2) == 0) {           // dashboard readings from the PC app
     parseDash(line + 2);
+    if (dd.wa >= 2 && rainAlertShown < 2 && state == ST_IDLE && !aud.active) {
+      Serial.printf("[esp] RAIN ALERT: %s\n", dd.wm);
+      playChime();
+      delay(150);
+      playChime();
+    }
+    rainAlertShown = dd.wa;
     if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashUpdate();
     return;
   }

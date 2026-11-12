@@ -18,7 +18,7 @@ TOKEN = "test-device-token"
 os.environ.update({"EMBED_MODEL": "", "LLM_BACKEND": "gemini", "TTS_ENABLED": "1", "KRISHI_SENSOR_TOKEN": TOKEN,
                    "TFIDF_MIN_SCORE": "0.10", "SENSOR_STORE": os.path.join(_tmp, "sensors.json"),
                    "SENSOR_STALE_S": "30", "SENSOR_OFFLINE_S": "120",
-                   "KRISHI_SENSOR_KEY": "", "SARVAM_API_KEY": "", "STT_PROVIDER": "sarvam"})
+                   "KRISHI_SENSOR_KEY": "", "SARVAM_API_KEY": "", "STT_PROVIDER": "sarvam", "WEATHER_API_KEY": ""})
 
 from fastapi.testclient import TestClient  # noqa: E402
 import app as krishi  # noqa: E402

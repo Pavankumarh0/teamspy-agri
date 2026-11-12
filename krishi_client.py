@@ -1031,11 +1031,22 @@ class DashboardPoller:
         self.server, self.every = server, every
         self._lock = threading.Lock()
         self._data, self._fetched, self._ok, self._new = None, 0.0, None, False
+        self._weather, self._weather_at = None, 0.0
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
         import httpx
         while True:
+            if time.time() - self._weather_at > 60:       # the server caches it for 10 min
+                try:
+                    w = httpx.get(f"{self.server}/api/krishi/weather", timeout=15).json()
+                    with self._lock:
+                        if w.get("alert", 0) >= 2 and (self._weather or {}).get("alert", 0) < 2:
+                            print(f"  RAIN ALERT on the dashboard: {w.get('message')}")
+                        self._weather = w if w.get("ok") else (self._weather if self._weather else w)
+                except Exception:
+                    pass
+                self._weather_at = time.time()
             try:
                 r = httpx.get(f"{self.server}/api/krishi/sensors/latest", timeout=3.0)
                 r.raise_for_status()
@@ -1060,8 +1071,12 @@ class DashboardPoller:
             if not self._new:
                 return None
             self._new = False
-            data, fetched, ok = self._data, self._fetched, self._ok
+            data, fetched, ok, w = self._data, self._fetched, self._ok, self._weather
         f = {"srv": "ok" if ok else "down", "st": "unknown" if not ok else "no_data"}
+        if w and w.get("ok"):
+            # weather: temp, condition, alert 0-3, message (no ';' or '=' - D: line syntax)
+            f.update(wt=self._num(w.get("temp_c")), wc=re.sub(r"[^A-Za-z]", "", w.get("condition", ""))[:12],
+                     wa=str(int(w.get("alert", 0))), wm=re.sub(r"[;=|]", " ", w.get("message", ""))[:60])
         if data:
             if ok:
                 f["st"] = data.get("status", "no_data")
@@ -1093,6 +1108,21 @@ def kiosk_crops(server, esp):
         print(f"  touch screen: crop list failed: {exc}")
 
 
+LAST_FERT = {}          # the recommendation the farmer is looking at (for star feedback)
+
+
+def kiosk_feedback(server, line):
+    """FB:<1-5> from the stars after a fertilizer recommendation."""
+    import httpx
+    try:
+        stars = int(line[3:].strip())
+        body = {"stars": stars, "kind": "fertilizer", "language": SCREEN_LANG["lang"], **LAST_FERT}
+        httpx.post(f"{server}/api/krishi/feedback", json=body, timeout=10).raise_for_status()
+        print(f"  feedback: {stars} star{'s' if stars != 1 else ''} for {LAST_FERT.get('crop', '?')}")
+    except Exception as exc:
+        print(f"  feedback not saved: {exc}")
+
+
 def kiosk_fertilizer(server, esp, line):
     """FERT:crop=tomato;area=1;n=low;p=unknown;k=high -> recommendation pages
     (FRB/FRT/FRL.../FRE), or FRX:<message> on failure."""
@@ -1115,6 +1145,9 @@ def kiosk_fertilizer(server, esp, line):
     lines += [f"FRL:{i}|{ln['style']}|{clean(ln['text'])}" for i, pg in enumerate(pages) for ln in pg]
     for ln in lines + ["FRE"]:
         esp._send(ln)
+    LAST_FERT.clear()
+    LAST_FERT.update(crop=rec["crop"], area_acres=rec["area_acres"], region=rec["region"]["id"],
+                     ratings=rec["ratings"], totals=rec["totals"])
     t = rec["totals"]
     print(f"  fertilizer: {rec['name']} {rec['area_acres']} acre, {rec['region']['name']}, soil {rec['ratings']} from {rec['rating_from']} -> "
           f"urea {t['urea_kg']} kg, DAP {t['dap_kg']} kg, MOP {t['mop_kg']} kg  ({rec['source']['crop']})")
@@ -1209,6 +1242,8 @@ def run_button_mode(server, esp, args):
                 set_screen_lang(line[5:])
             elif line == "CROPS?":
                 kiosk_crops(server, esp)
+            elif line.startswith("FB:"):
+                kiosk_feedback(server, line)
             elif line.startswith("FERT:"):
                 kiosk_fertilizer(server, esp, line)
             elif line.startswith(("[esp]", "ERR")):

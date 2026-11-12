@@ -175,7 +175,8 @@ def _fmt(x: float) -> str:
 
 
 def recommend(crop_id: str, area_acres: float, n: str = "unknown", p: str = "unknown", k: str = "unknown",
-              sensor: dict | None = None, sensor_status: str = "no_data", region: str = DEFAULT_REGION) -> dict:
+              sensor: dict | None = None, sensor_status: str = "no_data", region: str = DEFAULT_REGION,
+              weather_advice: list[str] | None = None) -> dict:
     """Soil Health Card ratings win; a nutrient without one takes the district's
     typical status (REGIONS); without either it gets the general dose."""
     crop = CROPS[crop_id]
@@ -231,7 +232,7 @@ def recommend(crop_id: str, area_acres: float, n: str = "unknown", p: str = "unk
         why.append("No soil card values or district data: this is the general dose. A soil test can lower your cost.")
     why.append("Nitrogen is split because it is easily lost; P and K are needed early by the roots.")
 
-    field = conditions(sensor, sensor_status)
+    field = (weather_advice or []) + conditions(sensor, sensor_status)
     return {
         "crop": crop_id, "name": crop.name, "note": crop.note, "area_acres": area_acres,
         "ratings": ratings, "rating_from": rating_from,

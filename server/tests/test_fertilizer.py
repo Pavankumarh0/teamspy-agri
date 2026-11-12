@@ -123,7 +123,8 @@ class FertilizerApiTests(unittest.TestCase):
         import tempfile
         import dotenv
         dotenv.load_dotenv = lambda *a, **k: None
-        os.environ.update({"EMBED_MODEL": "", "SENSOR_STORE": os.path.join(tempfile.mkdtemp(), "s.json")})
+        os.environ.update({"EMBED_MODEL": "", "SENSOR_STORE": os.path.join(tempfile.mkdtemp(), "s.json"), "WEATHER_API_KEY": "",
+                           "FEEDBACK_FILE": os.path.join(tempfile.mkdtemp(), "fb.jsonl")})
         from fastapi.testclient import TestClient
         import app
         cls.ctx = TestClient(app.app)

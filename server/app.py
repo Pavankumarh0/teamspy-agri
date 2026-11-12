@@ -35,7 +35,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import fertilizer, language, llm, sensors, speech, ui_i18n
+import fertilizer, language, llm, sensors, speech, ui_i18n, weather
 from grounding import grounded_sources
 from prompts import PROMPT
 from rag import Retriever
@@ -57,12 +57,14 @@ UNHEARD = "Sorry, I couldn't hear that clearly. Please try again and speak close
 DEAF = "Sorry, my speech service is not working right now. Please try again in a little while."
 NO_SENSOR_DATA = "I have not received any readings from the farm sensor device yet, so I cannot tell you the farm conditions."
 SENSOR_SOURCE = "live_sensors"     # how the sensor section is named in the prompt and in sources
+WEATHER_WORDS = re.compile(r"\b(weather|rain\w*|forecast|storm|cloud\w*)\b", re.I)
 GREET = re.compile(r"^\W*(hi|hello|hey|namaste|namaskara|namaskar|good (morning|afternoon|evening))\b[\s\W]*(krishi|there)?\W*$", re.I)
 THANKS = re.compile(r"^\W*(thanks|thank you|thank you very much|ok thanks|dhanyavada|bye|goodbye)\W*$", re.I)
 
 RET: Retriever | None = None
 AUDIO: "OrderedDict[str, dict]" = OrderedDict()
 LAST_Q: dict = {}
+LAST_CONTEXT: dict = {}        # session -> what the last answer was given (evaluation only)
 
 
 @asynccontextmanager
@@ -192,20 +194,29 @@ async def answer_question(q: str, sid: str = "web") -> dict:
     # Farm-condition questions also see the latest sensor reading, in its own
     # prompt section, kept apart from the knowledge documents.
     sensor, sensor_hit = None, None
+    if WEATHER_WORDS.search(q):
+        w = await asyncio.to_thread(weather.get, default_region())
+        if w.get("ok"):
+            wt = (f"Weather forecast for {w['place'].title()} (OpenWeatherMap, at {w['fetched_at']} India time): "
+                  f"{w['description']}, {w['temp_c']:g} degrees Celsius. {w['message']}.")
+            sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm data", "text": wt}
+            relevant = True
     if sensors.SENSOR_WORDS.search(q):
         rec = sensors.latest()
         if rec:
             sensor = {"device_id": rec["device_id"], "status": sensors.status(rec),
                       "received_at": rec["received_at"], "is_test_data": bool(rec.get("is_test_data"))}
-            sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm sensor readings", "text": sensors.as_context(rec)}
+            text = sensors.as_context(rec) + ("\n" + sensor_hit["text"] if sensor_hit else "")
+            sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm sensor readings", "text": text}
             relevant = True
-        elif not relevant or sensors.LIVE_INTENT.search(q):
+        elif sensor_hit is None and (not relevant or sensors.LIVE_INTENT.search(q)):
             return pack(q, NO_SENSOR_DATA, False, via="no-sensor-data")
     if not relevant:
         return pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     ctx = "\n\n".join(f"[{h['source']}] {h['title']}\n{h['text']}" for h in hits)
     live = sensor_hit["text"] if sensor_hit else "No live sensor reading is available for this question."
+    LAST_CONTEXT[sid] = ([sensor_hit["text"]] if sensor_hit else []) + [f"{h['title']}\n{h['text']}" for h in hits]
     try:
         raw = await llm.generate(PROMPT.format(sensors=live, context=ctx, question=q))
     except Exception as e:
@@ -260,6 +271,7 @@ class Chat(BaseModel):
     session: str = "web"
     language: Literal["en", "kn", "hi"] = "en"
     style: Literal["mixed", "native"] = "mixed"
+    include_context: bool = False      # evaluation: return the retrieved context too
 
 
 class Understand(BaseModel):
@@ -293,7 +305,11 @@ class SensorReading(BaseModel):
 
 @api.post("/chat")
 async def chat(body: Chat):
-    return await localize(await answer_question(body.question, body.session), body.language, body.style)
+    LAST_CONTEXT.pop(body.session, None)
+    r = await localize(await answer_question(body.question, body.session), body.language, body.style)
+    if body.include_context:
+        r["contexts"] = LAST_CONTEXT.pop(body.session, [])
+    return r
 
 
 @api.post("/understand")
@@ -435,11 +451,64 @@ async def fertilizer_recommend(body: FertilizerRequest):
     if region not in fertilizer.REGIONS:
         raise HTTPException(status_code=404, detail=f"Unknown region '{region}'.")
     rec = sensors.latest()
-    out = fertilizer.recommend(body.crop, body.area_acres, body.n, body.p, body.k, rec, sensors.status(rec), region)
+    w = await asyncio.to_thread(weather.get, region)
+    out = fertilizer.recommend(body.crop, body.area_acres, body.n, body.p, body.k, rec, sensors.status(rec), region,
+                               weather.advice(w))
+    out["weather"] = w
     title, pages = fertilizer.screen_pages(out)
     log.info("fertilizer: %s %.2f acre region=%s ratings=%s (%s) -> %s", body.crop, body.area_acres, region,
              out["ratings"], out["rating_from"], out["totals"])
     return {**out, "screen": {"title": title, "pages": [[{"style": s, "text": t} for s, t in pg] for pg in pages]}}
+
+
+@api.get("/weather")
+async def weather_now(region: str | None = None):
+    """Current weather and rain alert for the farm's district (OpenWeatherMap)."""
+    return await asyncio.to_thread(weather.get, region or default_region())
+
+
+class Feedback(BaseModel):
+    model_config = {"extra": "forbid"}
+    stars: int = Field(ge=1, le=5)
+    kind: Literal["fertilizer", "answer"] = "fertilizer"
+    crop: str | None = Field(default=None, max_length=20)
+    area_acres: float | None = Field(default=None, ge=0, le=100)
+    region: str | None = Field(default=None, max_length=24)
+    ratings: dict[str, str] | None = None
+    totals: dict[str, float] | None = None
+    language: str | None = Field(default=None, max_length=4)
+
+
+FEEDBACK_FILE = Path(os.getenv("FEEDBACK_FILE", ROOT / "server" / "data" / "feedback.jsonl"))
+
+
+@api.post("/feedback")
+async def feedback(body: Feedback):
+    """A farmer's 1-5 star rating, appended to data/feedback.jsonl."""
+    from datetime import datetime, timezone
+    entry = {"at": datetime.now(timezone.utc).isoformat(), **body.model_dump(exclude_none=True)}
+    FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with FEEDBACK_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    log.info("feedback: %d stars for %s %s", body.stars, body.kind, body.crop or "")
+    return {"ok": True}
+
+
+@api.get("/feedback/summary")
+async def feedback_summary():
+    rows = []
+    if FEEDBACK_FILE.exists():
+        for line in FEEDBACK_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+    by_crop: dict[str, list[int]] = {}
+    for r in rows:
+        by_crop.setdefault(r.get("crop") or "-", []).append(r["stars"])
+    avg = lambda xs: round(sum(xs) / len(xs), 2) if xs else None
+    return {"count": len(rows), "average_stars": avg([r["stars"] for r in rows]),
+            "by_crop": {c: {"count": len(v), "average_stars": avg(v)} for c, v in by_crop.items()}}
 
 
 @api.get("/health")
