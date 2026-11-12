@@ -76,7 +76,7 @@ class KrishiApiTests(unittest.TestCase):
 
     def test_not_in_kb_gives_the_not_enough_information_reply(self):
         with gemma("NOT_IN_KB"):
-            r = self.ask("What is the market price of tomato today?")
+            r = self.ask("Which tractor brand is the best to buy?")
         self.assertEqual(r["answer"], krishi.DONT_KNOW)
         self.assertIn("enough verified information", r["answer"])
 

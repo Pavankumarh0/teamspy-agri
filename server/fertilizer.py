@@ -277,9 +277,12 @@ def conditions(sensor: dict | None, status: str) -> list[str]:
     return out
 
 
+SAFETY_WARNING = "Pregnant women, children and the elderly should not handle fertilizers; wash hands after use."
+
+
 def screen_pages(rec: dict) -> tuple[str, list[list[tuple[str, str]]]]:
     """Title and pages of (style, text) lines for the kiosk's 320x240 TFT.
-    Styles: H heading, V big value, T text, W warning, S small."""
+    Styles: H heading, V big value, T text, W warning, S small, F footer (safety line)."""
     ar = rec["area_acres"]
     title = f"{rec['name']} - {_fmt(ar)} acre{'s' if ar != 1 else ''}"
     rt, rf = rec["ratings"], rec["rating_from"]
@@ -308,4 +311,7 @@ def screen_pages(rec: dict) -> tuple[str, list[list[tuple[str, str]]]]:
     p5 = [("H", "Field now (live sensors)")] + [("T", x) for x in rec["field"]]
     for e in rec["extras"]:
         p5.append(("T", f"Also: {e['what']} {_fmt(e['amount'])} {e['unit']}"))
-    return title, [p1, p2, p3, p4, p5]
+    pages = [p1, p2, p3, p4, p5]
+    for pg in pages:                      # the safety line closes every page of the recommendation
+        pg.append(("F", SAFETY_WARNING))   # F = footer, drawn at the bottom
+    return title, pages

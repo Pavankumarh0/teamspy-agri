@@ -113,7 +113,7 @@ class FertilizerTests(unittest.TestCase):
             for pg in pages:
                 self.assertLessEqual(len(pg), 12)
                 for style, text in pg:
-                    self.assertIn(style, "HVTWS")
+                    self.assertIn(style, "HVTWSF")
                     self.assertTrue(text.isascii() and len(text) <= 95 and "|" not in text, text)
 
 

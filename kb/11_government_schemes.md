@@ -15,4 +15,4 @@ Under the Soil Health Card scheme, farmers get their soil tested and receive a c
 The government supports drip and sprinkler irrigation, which save water, under the Per Drop More Crop part of the Pradhan Mantri Krishi Sinchayee Yojana. The share of the cost that is supported differs by state and by farmer category, so ask the agriculture or horticulture department for the current subsidy before buying a system.
 
 ## Where to ask about schemes
-The local agriculture officer, the Raitha Samparka Kendra, the Krishi Vigyan Kendra and the bank can explain which schemes a farmer is eligible for and help with the application. Market prices change every day and are not in this information; check the local market (APMC) or the government's agricultural market price portal for today's prices.
+The local agriculture officer, the Raitha Samparka Kendra, the Krishi Vigyan Kendra and the bank can explain which schemes a farmer is eligible for and help with the application. Market prices change every day; the kiosk can tell today's mandi prices for common crops, or check the local market (APMC) or the government's agricultural market price portal for today's prices.

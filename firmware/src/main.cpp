@@ -2240,11 +2240,18 @@ static void drawFertScreen() {
     drawBtn(BTN_PREV, "< Prev", D_CARD, D_TEXT);
     return;
   }
+  // The safety line (style F) sits at the bottom of every page, above the
+  // buttons, so it is never pushed off the screen by long content.
+  const FLine *footer = nullptr;
+  for (int i = 0; i < frCount; i++)
+    if (frLines[i].page == frPage && frLines[i].style == 'F') { footer = &frLines[i]; break; }
+  const int16_t footH = footer ? 2 * uiLineH(1) + 2 : 0;
   int16_t y = 36;
-  const int16_t maxY = 206;
+  const int16_t maxY = 206 - footH;
+  if (footer) drawWrapped(footer->text, 1, D_WARN, maxY + 2, 206);
   for (int i = 0; i < frCount && y < maxY; i++) {
     const FLine &l = frLines[i];
-    if (l.page != frPage) continue;
+    if (l.page != frPage || l.style == 'F') continue;
     switch (l.style) {
       case 'H': y = drawWrapped(l.text, 2, D_LEAF, y, maxY) + 2; break;
       case 'V': y = drawWrapped(l.text, 4, D_TEXT, y, maxY); break;

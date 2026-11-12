@@ -35,7 +35,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import fertilizer, language, llm, sensors, speech, ui_i18n, weather
+import fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
 from grounding import grounded_sources
 from prompts import PROMPT
 from rag import Retriever
@@ -57,6 +57,7 @@ UNHEARD = "Sorry, I couldn't hear that clearly. Please try again and speak close
 DEAF = "Sorry, my speech service is not working right now. Please try again in a little while."
 NO_SENSOR_DATA = "I have not received any readings from the farm sensor device yet, so I cannot tell you the farm conditions."
 SENSOR_SOURCE = "live_sensors"     # how the sensor section is named in the prompt and in sources
+FERT_WORDS = re.compile(r"\b(fertili[sz]\w*|urea|dap|mop|potash|npk|nitrogen|phosphorus|manure)\b", re.I)
 WEATHER_WORDS = re.compile(r"\b(weather|rain\w*|forecast|storm|cloud\w*)\b", re.I)
 GREET = re.compile(r"^\W*(hi|hello|hey|namaste|namaskara|namaskar|good (morning|afternoon|evening))\b[\s\W]*(krishi|there)?\W*$", re.I)
 THANKS = re.compile(r"^\W*(thanks|thank you|thank you very much|ok thanks|dhanyavada|bye|goodbye)\W*$", re.I)
@@ -209,7 +210,20 @@ async def answer_question(q: str, sid: str = "web") -> dict:
                   f"{w['description']}, {w['temp_c']:g} degrees Celsius. {w['message']}.")
             sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm data", "text": wt}
             relevant = True
-    if sensors.SENSOR_WORDS.search(q):
+    price_q = prices.is_price_question(q)
+    if price_q:
+        # "What is the rate of tomato today?" -> today's AGMARKNET mandi prices,
+        # in the live-data section like the weather (numbers checked the same way).
+        p = await asyncio.to_thread(prices.get, prices.find_crop(q), os.getenv("KRISHI_STATE", "Karnataka"),
+                                    fertilizer.REGIONS[default_region()].name)
+        if not p.get("ok"):
+            log.info("market price unavailable: %s", p.get("reason"))
+            return pack(q, prices.unavailable_message(p), True, via="no-price")
+        pt = prices.as_context(p)
+        sensor_hit = {"source": SENSOR_SOURCE, "title": "Live market prices",
+                      "text": pt + ("\n" + sensor_hit["text"] if sensor_hit else "")}
+        relevant = True
+    if sensors.SENSOR_WORDS.search(q) and not price_q:
         rec = sensors.latest()
         if rec:
             sensor = {"device_id": rec["device_id"], "status": sensors.status(rec),
@@ -249,7 +263,10 @@ async def answer_question(q: str, sid: str = "web") -> dict:
     sources = [s for s in cited if s in sources] or sources
     LAST_Q[sid] = q
     log.info("answered from %s", ", ".join(sources))
-    return pack(q, clean(answer), True, sources, sensor=sensor)
+    answer = clean(answer)
+    if FERT_WORDS.search(q) or FERT_WORDS.search(answer):
+        answer = f"{answer} {fertilizer.SAFETY_WARNING}"
+    return pack(q, answer, True, sources, sensor=sensor)
 
 
 async def localize(r: dict, lang: str, style: str = "mixed") -> dict:

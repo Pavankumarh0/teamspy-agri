@@ -285,15 +285,28 @@ The language screen's own words are built into the firmware (`firmware/include/l
 | File | Contents |
 |---|---|
 | `kb/10_women_farmers.md` | women decide on their farm, same advice for all; the 30 % rule for women farmers in agriculture schemes; MKSP; equal property rights (2005 amendment); KVK training |
-| `kb/11_government_schemes.md` | PM-KISAN (₹6000/yr in 3 instalments, PIB); crop insurance PMFBY, Soil Health Card, drip/sprinkler support (no unverified amounts); where to ask; market prices are not covered |
+| `kb/11_government_schemes.md` | PM-KISAN (₹6000/yr in 3 instalments, PIB); crop insurance PMFBY, Soil Health Card, drip/sprinkler support (no unverified amounts); where to ask; for today's crop prices see *Market prices* below |
 | `kb/12_pest_management.md` | integrated pest management, traps; pink bollworm, fall armyworm, aphids, potato late blight, rice stem borer. Practices only: no pesticide names or doses |
+| `kb/13_crop_diseases.md` | symptoms, conditions and non-chemical management of common diseases: paddy, ragi, maize, tomato, onion, potato, chilli, groundnut, banana, coffee; fungus / bacteria / virus signs. No fungicide names or doses |
+| `kb/14_soil_types.md` | red, black, laterite, alluvial, sandy, forest, saline/alkaline soils (where in Karnataka, properties, crops, care); texture, pH, soil testing |
 | `kb/09_recommended_fertilizer_doses.md` | + potato (UAS Bangalore, Hassan: 25 t FYM + 75:75:100 kg NPK/ha), + coffee split timing and the 40:30:40 per-split limit |
 
 - **Potato** is the 6th crop on the fertilizer screen.
 - **Coffee is not a fertilizer-screen crop.** The Coffee Board / CCRI dose table could not be retrieved and verified, so no coffee doses are given.
 - **Real farmer questions:** put a free data.gov.in key in `.env` (`DATA_GOV_IN_API_KEY`), then run:
-  1. `python evaletch_kcc.py <KCC resource id>`
-  2. `python evalun_eval.py --queries eval\queries_kcc.json --fresh`
+  1. `python eval\fetch_kcc.py <KCC resource id>`
+  2. `python eval\run_eval.py --queries eval\queries_kcc.json --fresh`
+
+## Market prices (today's crop rates)
+
+**Source:** AGMARKNET daily mandi prices, through the data.gov.in API ("Current Daily Price of Various Commodities from Various Markets"). Put a free data.gov.in key in `.env` as `DATA_GOV_IN_API_KEY`.
+- A question with a price word (price, rate, cost, mandi, market, bhav...) **and** a crop name (tomato, onion, ragi, paddy, maize, chilli, coconut, arecanut... see `server/prices.py`) gets today's prices as live data: up to 4 markets in `KRISHI_STATE` (default Karnataka, the farm's district first), or all India if no market in the state reported it.
+- Prices are rupees per quintal (100 kg); the answer names the market and the date. The numbers are checked against the API data like sensor readings.
+- Without the key, or if no market reported the crop today, the kiosk says so and points to Agmarknet / the nearest APMC. Fertilizer prices (urea etc.) are not covered.
+
+## Fertilizer safety warning
+
+Every fertilizer answer from the AI, and every page of the fertilizer screen (as a footer above the buttons), ends with one sentence: *"Pregnant women, children and the elderly should not handle fertilizers; wash hands after use."* (`fertilizer.SAFETY_WARNING`).
 
 ## Weather and rain alert
 
