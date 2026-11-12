@@ -7,3 +7,5 @@ server/debug/
 server/data/
 firmware/.pio/
 .vscode/
+eval/partial.json
+eval/run.log

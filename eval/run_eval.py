@@ -41,7 +41,21 @@ FAILED_VIA = {"unknown", "ungrounded", "error", "no-sensor-data"}
 RET = Retriever(ROOT / "kb", "", "gemini-embedding-001", ROOT / "server" / ".cache")
 
 
+CHECKPOINT = ROOT / "eval" / "partial.json"
+
+
 def ask(q: str, lang: str | None, sid: str) -> tuple[dict, float]:
+    """One question; if the server is down (restarted), wait and ask again."""
+    for attempt in range(30):
+        try:
+            return _ask(q, lang, sid)
+        except (httpx.TransportError, ValueError) as e:
+            print(f"   server unreachable ({type(e).__name__}); retrying in 10 s")
+            time.sleep(10)
+    raise RuntimeError("server unreachable for 5 minutes")
+
+
+def _ask(q: str, lang: str | None, sid: str) -> tuple[dict, float]:
     t0 = time.time()
     with httpx.Client(timeout=180) as c:
         english, reply_lang, style = q, "en", "mixed"
@@ -135,8 +149,11 @@ def context_precision(useful: list) -> float | None:
 
 async def main():
     data = json.loads((ROOT / "eval" / "queries.json").read_text(encoding="utf-8"))
-    results = []
+    done = json.loads(CHECKPOINT.read_text(encoding="utf-8")) if CHECKPOINT.exists() else {"queries": [], "red_team": []}
+    results = done["queries"]
     for i, item in enumerate(data["queries"]):
+        if i < len(results):
+            continue                                     # resumed from the checkpoint
         r, secs = ask(item["q"], item.get("lang"), f"eval{i}")
         answered = bool(r.get("in_scope")) and r.get("via") not in FAILED_VIA
         res = {"q": item["q"], "expect": item["expect"], "lang": item.get("lang", "en"), "answered": answered,
@@ -166,15 +183,19 @@ async def main():
                 cp = await judge(ctxprec_prompt(qen, "(no answer was given)", ctxs))
                 res["failure"] = "Out of Content" if any(cp.get("useful", [])) else "Out of Collection"
         results.append(res)
+        CHECKPOINT.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
         print(f"{i + 1:2}/{len(data['queries'])} {secs:5.1f}s {'OK ' if answered else res.get('failure', '?')[:18]:18} "
               f"F={res.get('flesch', '-')} faith={res.get('faithfulness', '-')} rel={res.get('answer_relevance', '-')} "
               f"cp={res.get('context_precision', '-')}  {item['q'][:50]}")
 
-    red = []
+    red = done["red_team"]
     for i, item in enumerate(data["red_team"]):
+        if i < len(red):
+            continue
         r, secs = ask(item["q"], None, f"red{i}")
         j = await judge(redteam_prompt(item["q"], r.get("answer", "")))
         red.append({**item, "answer": r.get("answer"), "via": r.get("via"), "latency_s": round(secs, 2), **j})
+        CHECKPOINT.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
         print(f"red {i + 1:2} stereotype={j.get('stereotype')} unsafe={j.get('unsafe')} agency={j.get('supports_agency')}  {item['q'][:55]}")
 
     (ROOT / "eval" / "results.json").write_text(json.dumps({"queries": results, "red_team": red}, ensure_ascii=False, indent=1),
