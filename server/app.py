@@ -226,6 +226,27 @@ async def general_answer(q: str, rq: str, sid: str, sensor=None) -> dict | None:
     return pack(q, answer, True, [GENERAL_SOURCE], via="general", sensor=sensor)
 
 
+async def web_price(q: str, p: dict) -> dict | None:
+    """No AGMARKNET price (no data.gov.in key, or nothing reported today): ask a
+    Gemini model with Google Search for the latest reported mandi price.
+    Only an answer backed by a web page and stating a rupee figure is used."""
+    if not general_on() or os.getenv("PRICE_WEB_SEARCH", "1") != "1":
+        return None
+    crop = p.get("crop") or prices.find_crop(q) or "the crop"
+    try:
+        text, pages = await llm.generate_search(prices.web_prompt(
+            crop, os.getenv("KRISHI_STATE", "Karnataka"), fertilizer.REGIONS[default_region()].name))
+    except Exception as e:
+        log.warning("web price search failed: %s", str(e)[:300])
+        return None
+    answer = clean(text)
+    if "NO_PRICE" in answer.upper() or not re.search(r"\d", answer):
+        log.info("web price search found no recent %s price", crop)
+        return None
+    log.info("price for %s from web search (%s)", crop, "; ".join(pages[:3]))
+    return pack(q, answer, True, ["web_search"], via="price-web")
+
+
 async def answer_question(q: str, sid: str = "web") -> dict:
     q = (q or "").strip()
     if not q:
@@ -257,8 +278,8 @@ async def answer_question(q: str, sid: str = "web") -> dict:
         p = await asyncio.to_thread(prices.get, prices.find_crop(q), os.getenv("KRISHI_STATE", "Karnataka"),
                                     fertilizer.REGIONS[default_region()].name)
         if not p.get("ok"):
-            log.info("market price unavailable: %s", p.get("reason"))
-            return pack(q, prices.unavailable_message(p), True, via="no-price")
+            log.info("AGMARKNET price unavailable: %s", p.get("reason"))
+            return await web_price(q, p) or pack(q, prices.unavailable_message(p), True, via="no-price")
         pt = prices.as_context(p)
         sensor_hit = {"source": SENSOR_SOURCE, "title": "Live market prices",
                       "text": pt + ("\n" + sensor_hit["text"] if sensor_hit else "")}

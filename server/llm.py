@@ -138,6 +138,37 @@ async def generate_general(prompt: str) -> str:
     raise RuntimeError("all general model attempts failed: " + "; ".join(errors))
 
 
+async def generate_search(prompt: str) -> tuple[str, list[str]]:
+    """A Gemini model with Google Search grounding: (answer, titles of the web
+    pages it used). An answer with no web page behind it is not returned."""
+    plan = [os.getenv("GENERAL_MODEL", "gemini-3-flash-preview").strip(),
+            os.getenv("GENERAL_FALLBACK_MODEL", "gemini-flash-lite-latest").strip()]
+    plan = [m for i, m in enumerate(plan) if m and m not in plan[:i]]
+    errors = []
+    async with httpx.AsyncClient(timeout=float(os.getenv("GENERAL_TIMEOUT", "15")) + 10) as c:
+        for model in plan:
+            try:
+                r = await c.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": os.getenv("GEMINI_API_KEY", "")},
+                    json={"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                          "tools": [{"google_search": {}}], "generationConfig": {"temperature": 0.1}})
+            except httpx.RequestError as e:
+                errors.append(f"{model}: {e}")
+                continue
+            if r.status_code != 200:
+                errors.append(f"{model}: HTTP {r.status_code}")
+                continue
+            cand = (r.json().get("candidates") or [{}])[0]
+            text = _answer_text({"candidates": [cand]}) if cand.get("content") else ""
+            chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+            titles = [ch.get("web", {}).get("title", "") for ch in chunks if ch.get("web")]
+            if text and titles:
+                return text, titles
+            errors.append(f"{model}: no grounded answer")
+    raise RuntimeError("web search failed: " + "; ".join(errors))
+
+
 async def generate(prompt: str) -> str:
     if os.getenv("LLM_BACKEND", "ollama").lower() == "gemini":
         return await _generate_gemini(prompt)

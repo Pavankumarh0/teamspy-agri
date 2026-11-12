@@ -313,7 +313,9 @@ When the knowledge base cannot answer a farming question, or Gemma fails, a Gemi
 **Source:** AGMARKNET daily mandi prices, through the data.gov.in API ("Current Daily Price of Various Commodities from Various Markets"). Put a free data.gov.in key in `.env` as `DATA_GOV_IN_API_KEY`.
 - A question with a price word (price, rate, cost, mandi, market, bhav...) **and** a crop name (tomato, onion, ragi, paddy, maize, chilli, coconut, arecanut... see `server/prices.py`) gets today's prices as live data: up to 4 markets in `KRISHI_STATE` (default Karnataka, the farm's district first), or all India if no market in the state reported it.
 - Prices are rupees per quintal (100 kg); the answer names the market and the date. The numbers are checked against the API data like sensor readings.
-- Without the key, or if no market reported the crop today, the kiosk says so and points to Agmarknet / the nearest APMC. Fertilizer prices (urea etc.) are not covered.
+- **Backup: web search.** Without the key, or if no market reported the crop today, a Gemini model with Google Search looks up the latest reported mandi price (`via: "price-web"`). It is used only if it is backed by a web page and states a rupee figure. This needs Google Search grounding quota on the `GEMINI_API_KEY` project (the free tier may refuse it with HTTP 429). `PRICE_WEB_SEARCH=0` turns it off.
+- **If neither works,** the kiosk says so and points to Agmarknet or the nearest APMC.
+- **Spelling:** "prize", "bhav", "daam", "keemat" and local crop names (tamatar, pyaz, eerulli, aloo...) are recognised. Fertilizer prices (urea etc.) are not covered.
 
 ## Fertilizer safety warning
 

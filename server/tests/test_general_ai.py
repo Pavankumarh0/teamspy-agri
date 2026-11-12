@@ -73,5 +73,25 @@ class GeneralAiTests(base.KrishiApiTests.__base__):
         self.assertEqual(r["answer"], krishi.DONT_KNOW)
 
 
+    def test_price_question_without_agmarknet_uses_web_search(self):
+        found = ("Tomato sold for 1200 to 1500 rupees per quintal at Kolar APMC on 12 November 2026. "
+                 "Prices change daily, so check with your nearest APMC before selling.")
+        with mock.patch.dict(os.environ, {"DATA_GOV_IN_API_KEY": ""}),                 mock.patch.object(krishi.llm, "generate_search", mock.AsyncMock(return_value=(found, ["APMC"]))) as s:
+            r = self.ask("tell me the market prize of tomatoes ?")
+        s.assert_awaited_once()
+        self.assertIn("tomato", s.await_args.args[0])
+        self.assertEqual((r["via"], r["answer"]), ("price-web", found))
+
+    def test_web_search_without_a_price_gives_the_usual_message(self):
+        with mock.patch.dict(os.environ, {"DATA_GOV_IN_API_KEY": ""}),                 mock.patch.object(krishi.llm, "generate_search", mock.AsyncMock(return_value=("NO_PRICE", ["x"]))):
+            r = self.ask("What is the rate of onion today?")
+        self.assertEqual(r["via"], "no-price")
+
+    def test_web_search_failure_gives_the_usual_message(self):
+        with mock.patch.dict(os.environ, {"DATA_GOV_IN_API_KEY": ""}),                 mock.patch.object(krishi.llm, "generate_search", mock.AsyncMock(side_effect=RuntimeError("429"))):
+            r = self.ask("What is the rate of onion today?")
+        self.assertEqual(r["via"], "no-price")
+
+
 if __name__ == "__main__":
     unittest.main()

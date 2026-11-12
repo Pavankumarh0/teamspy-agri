@@ -26,6 +26,9 @@ class FindCropTests(unittest.TestCase):
         self.assertEqual(prices.find_crop("green chilli rate"), "green chilli")
         self.assertEqual(prices.find_crop("mirchi ka bhav"), "chilli")
         self.assertTrue(prices.is_price_question("What is the market price of ragi today?"))
+        self.assertTrue(prices.is_price_question("tell me the market prize of tomatoes ?"))
+        self.assertEqual(prices.find_crop("tell me the market prize of tomatoes ?"), "tomato")
+        self.assertTrue(prices.is_price_question("tamatar ka bhav kya hai"))
 
     def test_not_price_questions(self):
         self.assertFalse(prices.is_price_question("How much urea for tomato?"))

@@ -57,9 +57,15 @@ ALIASES = {"chili": "chilli", "chillies": "chilli", "mirchi": "chilli", "capsicu
            "finger millet": "ragi", "sorghum": "jowar", "peanut": "groundnut", "areca": "arecanut",
            "supari": "arecanut", "red gram": "tur", "toor": "tur", "moong": "green gram", "chana": "bengal gram",
            "eggplant": "brinjal", "aubergine": "brinjal", "paddy rice": "paddy", "tomatoes": "tomato",
+           "tamatar": "tomato", "tamato": "tomato", "pyaz": "onion", "pyaaz": "onion", "eerulli": "onion",
+           "aloo": "potato", "alu": "potato", "batate": "potato", "bhatta": "paddy", "dhan": "paddy",
+           "makka": "maize", "mekkejola": "maize", "jola": "jowar", "menasinakai": "chilli", "kadalekai": "groundnut",
+           "baale": "banana", "kela": "banana", "tengu": "coconut", "nariyal": "coconut", "adike": "arecanut",
            "onions": "onion", "potatoes": "potato", "bananas": "banana", "coconuts": "coconut"}
 
-PRICE_WORDS = re.compile(r"\b(price|prices|rate|rates|cost|mandi|market|apmc|selling|sell|quintal|bhav|bhaav)\b", re.I)
+# "prize"/"prise": how speech-to-text often writes "price"
+PRICE_WORDS = re.compile(r"\b(prices?|prizes?|prises?|rates?|cost|costs|mandi|market|apmc|selling|sell|sold|"
+                         r"quintal|bhav|bhaav|bhaw|daam|keemat|kimat|worth)\b", re.I)
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 
@@ -161,6 +167,16 @@ def as_context(p: dict) -> str:
                      f"{_rs(m['modal'])} rupees, lowest {_rs(m['min'])}, highest {_rs(m['max'])} rupees per quintal.")
     lines.append("Prices change every day and differ between markets; check with the nearest APMC before selling.")
     return "\n".join(lines)
+
+
+WEB_PROMPT = """Find the latest wholesale market (mandi / APMC) price of {crop} in {state}, India{near}.
+Use only prices from the last 7 days that a web page you found actually reports. Answer in at most 3 short sentences of plain spoken English with no markdown: the price in rupees exactly as the source gives it (per quintal or per kilogram), the market name, and the date of that price. End with: Prices change daily, so check with your nearest APMC before selling.
+If you cannot find a price from the last 7 days, reply exactly: NO_PRICE"""
+
+
+def web_prompt(crop: str, state: str, district: str | None) -> str:
+    near = f", preferably in or near {district}" if district else ""
+    return WEB_PROMPT.format(crop=crop, state=state, near=near)
 
 
 def unavailable_message(p: dict) -> str:
