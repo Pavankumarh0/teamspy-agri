@@ -121,6 +121,9 @@ Expect `[esp] screen: dashboard` and `button GPIO27: tap ... hold = talk` in the
    - `device_id`: `unoq_soil_01`, and optionally `crop`.
 3. Run the app: the App Lab **Run** button, or on the board `arduino-app-cli app start user:smart-krishi-sensors`. It replaces whichever app was running; `test-moisture` stays installed.
 4. The App Lab console shows `--- SMART KRISHI SENSOR DATA #n ---` from the sketch and `[krishi] sent #n` from Python.
+5. **Make it the board's default app**, or a UNO Q reboot starts the previous default and the dashboard shows *Sensor offline*. Use App Lab's default-app option, or on the board:
+   `printf %s /home/arduino/ArduinoApps/smart-krishi-sensors > /var/lib/arduino-app-cli/default.app`
+   (`app list` then marks it with `*`). This board's previous default (WiFi Robot Remote) is saved as `/var/lib/arduino-app-cli/default.app.bak-wifi-robot-remote`.
 
 `config.json` is gitignored: the token is never in the code or the repo.
 
