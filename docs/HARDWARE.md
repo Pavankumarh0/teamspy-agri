@@ -92,7 +92,7 @@ The TFT shows **PC offline** until the PC app is running - that is correct.
 .\start.ps1
 ```
 
-Then on the kiosk: **hold the button → speak → let go.**
+The kiosk boots into the **farm dashboard**. **Tap** the button (under 0.4 s) to switch between the dashboard and the chat screen; **hold the button → speak → let go** to ask a question from either screen.
 
 | On the TFT | Meaning |
 |---|---|
@@ -103,15 +103,14 @@ Then on the kiosk: **hold the button → speak → let go.**
 | SPEAKING | the answer is playing |
 
 Presses are ignored while an answer is being prepared or spoken, and each
-recording needs a fresh press. A press shorter than 0.4 s is treated as an
-accident; recording stops by itself at 15 s.
+recording needs a fresh press. A press shorter than 0.4 s is a tap (screen
+switch, its audio is discarded); recording stops by itself at 15 s.
 
 The PC keeps the last recording at `server/debug/last_kiosk_mic.wav` - listen
 to it if recognition is poor.
 
 | Problem | Fix |
 |---|---|
-| "hold longer" | The press was under 0.4 s |
 | "No sound from the microphone" | The INMP441 sent no data - Stage 1 table |
 | Recognition is poor | Listen to `last_kiosk_mic.wav`. Speak within ~30 cm. If it clips, lower `MIC_GAIN_BITS` in `config.h`; if faint, raise it |
 | Speaker silent but text appears | The PC needs internet for edge-tts; check the server window for `TTS failed`. Check VIN=5V and SD=3V3 on the amp |

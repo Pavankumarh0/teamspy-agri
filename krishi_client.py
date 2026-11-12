@@ -573,6 +573,7 @@ class Esp32Link:
     def beep(self): self._send("BEEP")
     def heartbeat(self): self._send("HB")
     def idle(self): self._send("IDLE")      # the kiosk may accept a new button press
+    def dashboard(self, line): self._send(line[:400])   # "D:k=v;..." - DashboardPoller.take_line()
     def volume(self, pct): self._send(f"VOL:{max(0, min(100, int(pct)))}")
     def test_record(self, ms): self._send(f"MICREC:{int(ms)}")
 
@@ -871,16 +872,85 @@ def answer_kiosk_recording(server, esp, raw, kiosk_bytes, kiosk_ms, args):
     handle_question(server, heard["text"], args.session, esp, not args.no_audio, args.pc_audio, heard)
 
 
+class DashboardPoller:
+    """Fetches /api/krishi/sensors/latest every `every` seconds on its own
+    thread, so a slow or dead server never stalls the serial loop (which must
+    keep reading mic audio). The main loop asks for the newest D: line with
+    take_line() and sends it only between recordings and answers.
+
+    D: line fields (empty value = not available):
+        st   online | stale | offline | no_data | unknown (server unreachable)
+        age  seconds since the reading reached the server, at send time
+        t h  temperature degC, humidity %
+        sr sv sp   soil raw ADC, soil valid 0/1, soil percent (calibrated only)
+        mq mv      MQ-135 raw ADC, valid 0/1 (0 while warming up / faulty)
+        srv  ok | down       dev  device id       td  1 = test data
+    """
+
+    def __init__(self, server, every=5.0):
+        self.server, self.every = server, every
+        self._lock = threading.Lock()
+        self._data, self._fetched, self._ok, self._new = None, 0.0, None, False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import httpx
+        while True:
+            try:
+                r = httpx.get(f"{self.server}/api/krishi/sensors/latest", timeout=3.0)
+                r.raise_for_status()
+                data, ok = r.json(), True
+            except Exception:
+                data, ok = None, False
+            with self._lock:
+                if ok:
+                    self._data, self._fetched = data, time.time()
+                if ok != self._ok:
+                    print(f"  dashboard: server {'reachable' if ok else 'UNREACHABLE - showing last known reading'}")
+                self._ok, self._new = ok, True
+            time.sleep(self.every)
+
+    @staticmethod
+    def _num(v, nd=1):
+        return "" if v is None else (f"{v:.{nd}f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v))
+
+    def take_line(self):
+        """The newest D: line, once per poll; None when nothing new."""
+        with self._lock:
+            if not self._new:
+                return None
+            self._new = False
+            data, fetched, ok = self._data, self._fetched, self._ok
+        f = {"srv": "ok" if ok else "down", "st": "unknown" if not ok else "no_data"}
+        if data:
+            if ok:
+                f["st"] = data.get("status", "no_data")
+            rd = data.get("reading") or {}
+            if rd:
+                age = (data.get("age_seconds") or 0) + (time.time() - fetched)
+                f.update(age=str(int(age)), t=self._num(rd.get("temperature_c")),
+                         h=self._num(rd.get("humidity_percent"), 0), sr=self._num(rd.get("soil_moisture_raw")),
+                         sv="1" if rd.get("soil_sensor_valid") else "0",
+                         sp=self._num(rd.get("soil_moisture_percent"), 0), mq=self._num(rd.get("mq135_raw")),
+                         mv="1" if rd.get("mq135_valid", True) else "0",
+                         dev=re.sub(r"[^A-Za-z0-9_\-]", "", str(rd.get("device_id", "")))[:24],
+                         td="1" if rd.get("is_test_data") else "0")
+        return "D:" + ";".join(f"{k}={v}" for k, v in f.items())
+
+
 def run_button_mode(server, esp, args):
     """Wait for the kiosk's talk button and answer each recording.
 
     The ESP32 streams its INMP441 audio while the button is held ("REC:START",
     then "MIC:" packets, then "REC:END" on release). Each finished recording is
-    answered, then "IDLE" tells the kiosk it may accept the next press.
+    answered, then "IDLE" tells the kiosk it may accept the next press. A short
+    tap only switches the kiosk between its dashboard and chat screens: the
+    ESP32 reports it as "REC:CANCEL tap" and the audio is dropped.
     """
-    print("\nReady. Hold the button on the kiosk, ask your question, then let go.  Ctrl+C to quit.")
+    print("\nReady. Kiosk button: TAP to switch dashboard/chat, HOLD to ask a question.  Ctrl+C to quit.")
     esp.status("ready")
     esp.heartbeat()
+    dash = DashboardPoller(server)
     rec, rec_last, last_hb = None, 0.0, time.time()
     try:
         while True:
@@ -889,6 +959,12 @@ def run_button_mode(server, esp, args):
             if rec is None and time.time() - last_hb > 2.0:
                 esp.heartbeat()
                 last_hb = time.time()
+            # Dashboard data: only while no recording is streaming in, and never
+            # during an answer (this loop is busy then, and the link is audio).
+            if rec is None:
+                line = dash.take_line()
+                if line:
+                    esp.dashboard(line)
 
             ev = esp.next_event(0.2)
             if ev is None:
@@ -928,8 +1004,14 @@ def run_button_mode(server, esp, args):
                     esp.idle()
                     last_hb = time.time()
             elif line.startswith("REC:CANCEL"):
-                print(f"  (recording discarded: {line[11:] or 'too short'} - hold the button while you speak)")
+                reason = line[11:].strip()
+                if reason == "tap":
+                    print("  (button tap: screen switched)")
+                else:
+                    print(f"  (recording discarded: {reason or 'too short'})")
                 rec = None
+            elif line.startswith("[esp] screen"):
+                print(f"  kiosk: {line[6:]}")
             elif line.startswith(("[esp]", "ERR")):
                 print(f"  kiosk: {line}")
     except KeyboardInterrupt:

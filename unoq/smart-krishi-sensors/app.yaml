@@ -1,0 +1,5 @@
+name: Smart Krishi Sensors
+icon: 🌱
+description: Reads DHT11, soil moisture (raw) and MQ-135 (raw) every 5 s and posts them to the Smart Krishi server.
+ports: []
+bricks: []

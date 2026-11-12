@@ -286,13 +286,25 @@ static void drawQr(const char *url, const char *label) {
 
 static const int16_t BAR_H = 20;
 
+// ---------------------------------------------------------------------------
+// Screen mode: the farm dashboard (default at boot) or the voice chat screen.
+// A short button tap switches between them; holding the button records (see
+// loop()). While the dashboard is up, the chat screen's drawing functions do
+// nothing (their state still updates), and the chat screen is redrawn whole
+// when it comes back - the same approach as the route QR above.
+// ---------------------------------------------------------------------------
+enum UiMode { UI_DASH, UI_CHAT };
+static UiMode ui = UI_DASH;
+static bool pcAlive();
+static void chatPump();                         // keeps the mic flowing during long redraws
+
 static void drawTitleBar(const char *status) {
-  if (qrShown) return;                          // the QR uses the whole screen
+  if (qrShown || ui == UI_DASH) return;         // the QR / dashboard use the whole screen
   tft.fillRect(0, 0, SCREEN_W, BAR_H, COL_CARD);
   tft.fillCircle(10, BAR_H / 2, 4, COL_SUN);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(COL_TEXT, COL_CARD);
-  tft.drawString("SMART KRISHI", 20, BAR_H / 2 + 1, 2);
+  tft.drawString("SMART KRISHI AI", 20, BAR_H / 2 + 1, 2);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(COL_DIM, COL_CARD);
   tft.drawString(status, SCREEN_W - 6, BAR_H / 2 + 1, 2);
@@ -421,7 +433,7 @@ static void drawBuddy() {
   tft.fillRect(FACE_CX - 8, HEAD_Y + HEAD_H - 2, 16, 10, COL_SAFF_D);              // neck
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(COL_TEXT, COL_TEAL);
-  tft.drawString("M", FACE_CX, HEAD_Y + HEAD_H + 28, 4);
+  tft.drawString("K", FACE_CX, HEAD_Y + HEAD_H + 28, 4);
   // arms
   tft.fillRoundRect(FACE_CX - 42, HEAD_Y + HEAD_H + 12, 12, 34, 6, COL_TEAL);
   tft.fillRoundRect(FACE_CX + 30, HEAD_Y + HEAD_H + 12, 12, 34, 6, COL_TEAL);
@@ -453,7 +465,7 @@ static void setMood(Mood m) {
   gazeX = gazeY = 0;
   fxFrame = 0;
   mouthShown = -1;
-  if (qrShown) return;                          // drawn when the QR is taken down
+  if (qrShown || ui == UI_DASH) return;         // drawn when the chat screen comes back
   drawEyes();
   drawMouth(0);
   drawCheeks(m == MOOD_HAPPY || m == MOOD_TALK);
@@ -462,7 +474,7 @@ static void setMood(Mood m) {
 /* Called every loop: blinking, glancing around, the "z z" and "..." and the
    mouth moving with the speech. Everything is time-based and non-blocking. */
 static void buddyTick() {
-  if (qrShown) return;                          // no blinking over the QR code
+  if (qrShown || ui == UI_DASH) return;         // no blinking over the QR code / dashboard
   const uint32_t now = millis();
 
   // a happy or confused face relaxes back to idle after a few seconds
@@ -539,6 +551,7 @@ static void drawBubble() {
 
 /* A short headline (large font if it fits) and a body text. */
 static void bubbleMessage(const char *headline, const char *body, uint16_t headColour = COL_MINT_D) {
+  if (ui == UI_DASH) return;
   drawBubble();
   int16_t y = IN_TOP + 4;
   if (headline && headline[0]) {
@@ -581,6 +594,7 @@ static int16_t drawQuestionStrip() {
 }
 
 static void drawAnswerPage(int page) {
+  if (ui == UI_DASH) return;
   if (page < 0 || page >= pageCount) return;
   drawBubble();
   answerTop = drawQuestionStrip();
@@ -611,6 +625,7 @@ static void drawAnswerPage(int page) {
 
 /* "Let me check" with pulsing dots, under the question if there is one yet. */
 static void drawThinkingBubble() {
+  if (ui == UI_DASH) return;
   drawBubble();
   const int16_t y = drawQuestionStrip() + 6;
   const char *msg = questionText[0] ? "Let me check" : "Hmm, one moment";
@@ -661,7 +676,7 @@ static void showAnswer(const char *text) {
 
 static void drawIdleBubble() {
   bubbleMessage("Namaskara!", "Hold the button and ask me about crops, soil, watering, "
-                              "fertilizers or plant problems.");
+                              "fertilizers or your farm. Tap it for the dashboard.");
 }
 
 static void drawOfflineBubble() {
@@ -701,6 +716,7 @@ static void drawListening(const char *prompt) {
 /* The voice meter: a row of bars along the bottom of the bubble that scrolls
    as the visitor speaks. lvl is 0-100. */
 static void drawLevel(int lvl) {
+  if (ui == UI_DASH) return;
   lvl = lvl < 0 ? 0 : lvl > 100 ? 100 : lvl;
   memmove(meterHist, meterHist + 1, METER_BARS - 1);
   meterHist[METER_BARS - 1] = (uint8_t)lvl;
@@ -713,6 +729,258 @@ static void drawLevel(int lvl) {
     tft.fillRoundRect(x, bottom - bh, barW, bh, 2, meterHist[i] > 15 ? COL_SAFF : COL_TEAL);
   }
 }
+// ---------------------------------------------------------------------------
+// Farm dashboard (Mode A)
+// ---------------------------------------------------------------------------
+//
+// The readings come from the UNO Q sensor device via the server; the PC app
+// fetches them and sends one line every 5 s over this same USB link:
+//   D:st=online;age=4;t=28.5;h=31;sr=16363;sv=0;sp=;mq=1748;mv=1;srv=ok;dev=unoq_soil_01;td=0
+// An empty value means "not available" and is shown as "--". Nothing here is
+// ever made up: the soil card says "Not calibrated" until the device sends a
+// calibrated percentage, and MQ-135 is shown as the raw number it is.
+//
+// The frame (header, cards, labels) is drawn once; after that only a field
+// whose text or colour changed is repainted, so the screen never flickers.
+
+static const uint16_t D_BG   = 0x09E5;   // #0f3d2e deep field green
+static const uint16_t D_BAR  = 0x0123;   // #062619
+static const uint16_t D_CARD = 0x1AE8;   // #1a5c43
+static const uint16_t D_LEAF = 0x8E8F;   // #8bd17c
+static const uint16_t D_TEXT = 0xFFFF;
+static const uint16_t D_MUTE = 0xB698;   // #b7d3c2
+static const uint16_t D_DIM  = 0x7C70;   // #7a8f80 old / unavailable values
+static const uint16_t D_WARN = 0xF5E7;   // #f1bd3b
+static const uint16_t D_BAD  = 0xE289;   // #e5534b
+
+static struct {
+  bool have;                 // any D: line received since boot
+  bool srvOk, sv, mv, td;
+  long age;                  // seconds since the server got the reading, when sent (-1 none)
+  uint32_t rxMs;             // when the D: line arrived
+  char st[10], t[10], h[10], sr[10], sp[10], mq[10], dev[26];
+} dd;
+
+struct DField { char txt[40]; uint16_t fg; bool drawn; };
+enum { F_HEAD, F_V0, F_V1, F_V2, F_V3, F_S0, F_S1, F_S2, F_S3, F_SENSOR, F_LINK, F_AGE, F_COUNT };
+static DField dfields[F_COUNT];
+static uint16_t dotColour = 0;
+static uint32_t lastDashTickMs = 0;
+
+static const int16_t CARD_W = 148, CARD_H = 74;
+static const int16_t CARD_X[4] = {8, 164, 8, 164};
+static const int16_t CARD_Y[4] = {38, 38, 118, 118};
+static const char *const CARD_LABEL[4] = {"Temperature", "Humidity", "Soil moisture", "Air - MQ-135"};
+
+static void dashCopy(char *dst, size_t n, const char *src) {
+  size_t i = 0;
+  for (; src[i] && i < n - 1; i++) dst[i] = (src[i] >= 32 && src[i] < 127) ? src[i] : '?';
+  dst[i] = '\0';
+}
+
+static void parseDash(char *body) {
+  memset(&dd, 0, sizeof dd);
+  dd.have = true;
+  dd.age = -1;
+  dd.rxMs = millis();
+  strcpy(dd.st, "unknown");
+  char *save = nullptr;
+  for (char *kv = strtok_r(body, ";", &save); kv; kv = strtok_r(nullptr, ";", &save)) {
+    char *eq = strchr(kv, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    const char *k = kv, *v = eq + 1;
+    if (!strcmp(k, "st")) dashCopy(dd.st, sizeof dd.st, v);
+    else if (!strcmp(k, "age")) dd.age = v[0] ? atol(v) : -1;
+    else if (!strcmp(k, "t")) dashCopy(dd.t, sizeof dd.t, v);
+    else if (!strcmp(k, "h")) dashCopy(dd.h, sizeof dd.h, v);
+    else if (!strcmp(k, "sr")) dashCopy(dd.sr, sizeof dd.sr, v);
+    else if (!strcmp(k, "sp")) dashCopy(dd.sp, sizeof dd.sp, v);
+    else if (!strcmp(k, "mq")) dashCopy(dd.mq, sizeof dd.mq, v);
+    else if (!strcmp(k, "dev")) dashCopy(dd.dev, sizeof dd.dev, v);
+    else if (!strcmp(k, "sv")) dd.sv = v[0] == '1';
+    else if (!strcmp(k, "mv")) dd.mv = v[0] == '1';
+    else if (!strcmp(k, "td")) dd.td = v[0] == '1';
+    else if (!strcmp(k, "srv")) dd.srvOk = !strcmp(v, "ok");
+  }
+}
+
+/* Repaints one field's rectangle only if its text or colour changed. */
+static void dashField(int id, int16_t rx, int16_t ry, int16_t rw, int16_t rh, int16_t ax, int16_t ay,
+                      uint8_t datum, uint8_t font, const char *txt, uint16_t fg, uint16_t bg) {
+  DField &f = dfields[id];
+  if (f.drawn && f.fg == fg && strncmp(f.txt, txt, sizeof f.txt - 1) == 0) return;
+  dashCopy(f.txt, sizeof f.txt, txt);
+  f.fg = fg;
+  f.drawn = true;
+  tft.fillRect(rx, ry, rw, rh, bg);
+  tft.setTextDatum(datum);
+  tft.setTextColor(fg, bg);
+  tft.drawString(txt, ax, ay, font);
+}
+
+/* A card's big value with its unit ("deg" = a degree sign + C). The cache key
+   is value + unit, so the pair is repainted together. */
+static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
+  char key[40];
+  snprintf(key, sizeof key, "%s|%s", value, unit);
+  DField &f = dfields[F_V0 + i];
+  if (f.drawn && f.fg == fg && strcmp(f.txt, key) == 0) return;
+  dashCopy(f.txt, sizeof f.txt, key);
+  f.fg = fg;
+  f.drawn = true;
+  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 26, w = CARD_W - 20;
+  tft.fillRect(x, y, w, 28, D_CARD);
+  const uint8_t font = tft.textWidth(value, 4) + 30 <= w ? 4 : 2;     // "Not calibrated" uses font 2
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(fg, D_CARD);
+  tft.drawString(value, x, font == 4 ? y + 1 : y + 6, font);
+  int16_t ux = x + tft.textWidth(value, font) + 4;
+  if (!strcmp(unit, "deg")) {
+    tft.drawCircle(ux + 2, y + 5, 2, fg);
+    tft.drawString("C", ux + 6, y + 4, 2);
+  } else if (unit[0]) {
+    tft.drawString(unit, ux, y + 4, 2);
+  }
+}
+
+static void dashSub(int i, const char *txt, uint16_t fg) {
+  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 56, CARD_W - 20, 12, CARD_X[i] + 10, CARD_Y[i] + 57,
+            TL_DATUM, 1, txt, fg, D_CARD);
+}
+
+static void dashUpdate() {
+  if (ui != UI_DASH) return;
+  const bool pc = pcAlive();
+  const bool fresh = dd.have && millis() - dd.rxMs < DASH_DATA_TIMEOUT_MS;
+  const bool online = !strcmp(dd.st, "online");
+  const bool live = pc && fresh && dd.srvOk && online;          // values are current measurements
+
+  // --- header: TEST DATA flag, else the subtitle ---
+  dashField(F_HEAD, 190, 4, 126, 22, 312, 15, MR_DATUM, 2, dd.have && dd.td ? "TEST DATA" : "Farm dashboard",
+            dd.have && dd.td ? D_WARN : D_MUTE, D_BAR);
+
+  // --- the four cards ---
+  const uint16_t vfg = live ? D_TEXT : D_DIM;
+  const char *old = (dd.have && !live) ? "last known" : "";
+  char buf[40];
+  if (dd.t[0]) { dashValue(0, dd.t, "deg", vfg); dashSub(0, old[0] ? old : "air, DHT11", old[0] ? D_WARN : D_MUTE); }
+  else { dashValue(0, "--", "", D_DIM); dashSub(0, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+  if (dd.h[0]) { dashValue(1, dd.h, "%", vfg); dashSub(1, old[0] ? old : "relative, DHT11", old[0] ? D_WARN : D_MUTE); }
+  else { dashValue(1, "--", "", D_DIM); dashSub(1, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+  if (dd.sv && dd.sp[0]) {
+    dashValue(2, dd.sp, "%", vfg);
+    snprintf(buf, sizeof buf, "raw %s%s", dd.sr, old[0] ? ", last known" : "");
+    dashSub(2, buf, old[0] ? D_WARN : D_MUTE);
+  } else if (dd.sr[0]) {
+    dashValue(2, "Not calibrated", "", D_WARN);
+    snprintf(buf, sizeof buf, "raw %s%s", dd.sr, atol(dd.sr) >= 16319 ? " - check probe" : "");
+    dashSub(2, buf, D_MUTE);
+  } else { dashValue(2, "--", "", D_DIM); dashSub(2, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+  if (dd.mq[0]) {
+    dashValue(3, dd.mq, "raw", dd.mv ? vfg : D_DIM);
+    dashSub(3, !dd.mv ? "warming up / check" : old[0] ? "last known" : "uncalibrated, not ppm",
+            (!dd.mv || old[0]) ? D_WARN : D_MUTE);
+  } else { dashValue(3, "--", "", D_DIM); dashSub(3, dd.have ? "no valid reading" : "waiting for data", D_MUTE); }
+
+  // --- status line 1: the sensor device, and the PC / server link ---
+  const char *sensorTxt;
+  uint16_t dot;
+  if (!pc)                       { sensorTxt = "PC app offline";     dot = D_BAD; }
+  else if (!dd.have || !fresh)   { sensorTxt = "Waiting for data";   dot = D_DIM; }
+  else if (!dd.srvOk)            { sensorTxt = "Server unreachable"; dot = D_BAD; }
+  else if (online)               { sensorTxt = "Sensor online";      dot = D_LEAF; }
+  else if (!strcmp(dd.st, "stale"))   { sensorTxt = "Sensor stale";   dot = D_WARN; }
+  else if (!strcmp(dd.st, "offline")) { sensorTxt = "Sensor offline"; dot = D_BAD; }
+  else                           { sensorTxt = "No sensor data yet"; dot = D_DIM; }
+  if (dot != dotColour) { tft.fillCircle(14, 206, 5, dot); dotColour = dot; }
+  dashField(F_SENSOR, 24, 198, 170, 16, 24, 206, ML_DATUM, 2, sensorTxt, dot == D_DIM ? D_MUTE : D_TEXT, D_BG);
+  snprintf(buf, sizeof buf, "PC %s  Server %s", pc ? "ok" : "off",
+           !pc || !dd.have ? "?" : dd.srvOk ? "ok" : "down");
+  dashField(F_LINK, 196, 198, 120, 16, 312, 206, MR_DATUM, 2, buf, (pc && dd.srvOk) ? D_MUTE : D_BAD, D_BG);
+
+  // --- status line 2: how old the reading is ---
+  if (dd.have && dd.age >= 0) {
+    const unsigned long a = (unsigned long)dd.age + (millis() - dd.rxMs) / 1000;
+    char ago[16];
+    if (a < 120) snprintf(ago, sizeof ago, "%lus", a);
+    else if (a < 7200) snprintf(ago, sizeof ago, "%lu min", a / 60);
+    else snprintf(ago, sizeof ago, "%lu h", a / 3600);
+    snprintf(buf, sizeof buf, "%s %s ago", live ? "Updated" : "Last reading", ago);
+  } else {
+    snprintf(buf, sizeof buf, "No reading yet");
+  }
+  dashField(F_AGE, 4, 218, 196, 16, 10, 226, ML_DATUM, 2, buf, live ? D_MUTE : D_WARN, D_BG);
+}
+
+static void dashDrawFrame() {
+  tft.fillScreen(D_BG);
+  tft.fillRect(0, 0, SCREEN_W, 30, D_BAR);
+  tft.fillCircle(14, 15, 5, D_LEAF);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(D_LEAF, D_BAR);
+  tft.drawString("SMART KRISHI", 26, 16, 4);
+  for (int i = 0; i < 4; i++) {
+    tft.fillRoundRect(CARD_X[i], CARD_Y[i], CARD_W, CARD_H, 8, D_CARD);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(D_MUTE, D_CARD);
+    tft.drawString(CARD_LABEL[i], CARD_X[i] + 10, CARD_Y[i] + 7, 2);
+  }
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(D_DIM, D_BG);
+  tft.drawString("Tap: chat   Hold: ask", 312, 226, 1);
+  for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
+  dotColour = 0;
+  dashUpdate();
+}
+
+/* Once a second: the "updated N s ago" counter and the link state. */
+static void dashTick() {
+  if (millis() - lastDashTickMs < DASH_REFRESH_MS) return;
+  lastDashTickMs = millis();
+  dashUpdate();
+}
+
+// --- switching screens -------------------------------------------------------
+
+static void enterChat() {
+  if (ui == UI_CHAT) return;
+  ui = UI_CHAT;
+  qrShown = false;
+  Serial.println(F("[esp] screen: chat"));
+  // the face to come back with: asleep without the PC app, else awake
+  if (!pcAlive()) mood = MOOD_SLEEPY;
+  else if (mood == MOOD_SLEEPY) mood = MOOD_IDLE;
+  chatPump();
+  tft.fillScreen(COL_BG);
+  chatPump();
+  drawBuddy();
+  chatPump();
+  if (!pcAlive()) {
+    drawOfflineBubble();
+    drawTitleBar("PC offline");
+  } else if (pageCount > 0) {                  // the last answer is still there
+    drawAnswerPage(pageShown >= 0 && pageShown < pageCount ? pageShown : 0);
+    drawTitleBar("answer");
+  } else {
+    drawIdleBubble();
+    drawTitleBar("ready");
+  }
+  chatPump();
+}
+
+static void enterDash() {
+  ui = UI_DASH;
+  Serial.println(F("[esp] screen: dashboard"));
+  dashDrawFrame();
+}
+
+static void toggleScreen() {
+  if (ui == UI_DASH) enterChat();
+  else enterDash();
+}
+
+
 // ---------------------------------------------------------------------------
 // Speaker - MAX98357A on I2S1
 // ---------------------------------------------------------------------------
@@ -1039,6 +1307,10 @@ static int detectMicSlot() {
 static uint32_t recStartMs = 0, recBytes = 0, recLimitMs = REC_MAX_MS;
 static uint32_t busySinceMs = 0, lastLevelMs = 0;
 static bool recFromButton = false;
+// A button recording streams from the moment of the press (so no first word is
+// lost), but LISTENING is only drawn once the press has lasted REC_MIN_MS: a
+// shorter press is a tap that switches screens, and must not flash the chat.
+static bool recShown = true;
 static double levelSq = 0;
 static uint32_t levelN = 0;
 
@@ -1046,7 +1318,11 @@ static void startRecording(bool fromButton, uint32_t limitMs) {
   state = ST_RECORDING;
   recFromButton = fromButton;
   recLimitMs = limitMs;
-  drawListening(fromButton ? "Listening... speak now" : "Test recording...");
+  recShown = !fromButton;
+  if (!fromButton) {               // MICREC test: show it at once
+    enterChat();
+    drawListening("Test recording...");
+  }
   micFlush();                      // drop audio captured before the press
   dcX = dcY = 0.0f;
   recBytes = 0;
@@ -1087,19 +1363,31 @@ static void pumpMic() {
     const double rms = sqrt(levelSq / levelN);
     // Reference ~ an ordinary room: measured idle level on this mic is ~120 (int16,
     // after MIC_GAIN_BITS), which reads ~25%; normal speech fills most of the bar.
-    drawLevel((int)(50.0 * log10((rms > 1 ? rms : 1) / 40.0)));
+    if (recShown) drawLevel((int)(50.0 * log10((rms > 1 ? rms : 1) / 40.0)));
     levelSq = 0;
     levelN = 0;
     lastLevelMs = millis();
   }
 }
 
+static void chatPump() {
+  if (state == ST_RECORDING) pumpMic();
+}
+
 static void stopRecording() {
   const uint32_t ms = millis() - recStartMs;
-  drawLevel(0);
+  if (recShown) drawLevel(0);
+  if (recFromButton && ms < REC_MIN_MS) {
+    // A tap, not a question: drop the audio and switch screens.
+    Serial.println(F("REC:CANCEL tap"));
+    state = ST_IDLE;
+    toggleScreen();
+    return;
+  }
   if (ms < REC_MIN_MS || recBytes == 0) {
     Serial.printf("REC:CANCEL %s\n", recBytes ? "too-short" : "no-audio");
     state = ST_IDLE;
+    enterChat();
     setMood(MOOD_CONFUSED);
     if (recBytes) bubbleMessage("Oops!", "Keep holding the button the whole time you speak, then let go.");
     else bubbleMessage("I can't hear!", "No sound is coming from my microphone. Check the INMP441 wiring.");
@@ -1107,6 +1395,10 @@ static void stopRecording() {
     return;
   }
   Serial.printf("REC:END %lu %lu\n", (unsigned long)recBytes, (unsigned long)ms);
+  if (!recShown) {                 // released right at the threshold, before LISTENING was drawn
+    recShown = true;
+    enterChat();
+  }
   state = ST_BUSY;
   busySinceMs = millis();
   questionText[0] = '\0';
@@ -1174,8 +1466,21 @@ static void handleLine(char *line) {
 
   if (strcmp(line, "HB") == 0) { lastHbMs = millis(); return; }
   if (strcmp(line, "PING") == 0) { Serial.println(F("PONG")); return; }
+  if (strncmp(line, "D:", 2) == 0) {           // dashboard readings from the PC app
+    parseDash(line + 2);
+    if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashUpdate();
+    return;
+  }
   if (strcmp(line, "CLR") == 0) {
-    drawIdleScreen();
+    if (ui == UI_DASH) {                       // forget the chat, keep the dashboard
+      questionText[0] = '\0';
+      answerSource[0] = '\0';
+      pageCount = 0;
+      mood = MOOD_IDLE;
+      dashUpdate();
+    } else {
+      drawIdleScreen();
+    }
     pcShownAlive = true;
     Serial.println(F("[esp] cleared"));
     return;
@@ -1196,6 +1501,7 @@ static void handleLine(char *line) {
       Serial.println(F("ERR:QR URL must be 8-200 characters"));
       return;
     }
+    enterChat();
     drawQr(url, label);
     Serial.println(F("[esp] route QR shown"));
     return;
@@ -1237,6 +1543,7 @@ static void handleLine(char *line) {
     const char *body = line + 2;
     switch (line[0]) {
       case 'L':
+        enterChat();
         drawListening(body[0] ? body : "Listening... speak now");
         return;
       case 'M':
@@ -1251,12 +1558,14 @@ static void handleLine(char *line) {
       case 'Q':
         messageCount++;
         answerSource[0] = '\0';        // a new question has no source yet
+        enterChat();
         setMood(MOOD_THINK);
         showQuestion(body);
         drawTitleBar("PROCESSING");
         Serial.printf("[esp] Q #%lu (%u chars)\n", (unsigned long)messageCount, (unsigned)strlen(body));
         return;
       case 'A':
+        enterChat();
         showAnswer(body);
         drawTitleBar("answer");
         Serial.printf("[esp] A (%u chars, %d page%s)\n", (unsigned)strlen(body),
@@ -1358,10 +1667,9 @@ void setup() {
 
   tft.init();
   tft.setRotation(1);
-  drawIdleScreen();
-  setMood(MOOD_SLEEPY);
-  drawOfflineBubble();
-  drawTitleBar("PC offline");
+  mood = MOOD_SLEEPY;                          // the chat face, for when chat is opened
+  ui = UI_DASH;                                // boot into the farm dashboard
+  dashDrawFrame();
 
   const bool ampOk = ampBegin();
   const bool micOk = micBegin();
@@ -1378,22 +1686,31 @@ void setup() {
   Serial.printf("[esp] mic INMP441  SCK=%d WS=%d SD=%d  %d Hz  %s\n",
                 MIC_SCK, MIC_WS, MIC_SD, MIC_RATE, micOk ? "ok" : "FAILED");
   if (micOk) micSlot = detectMicSlot();
-  Serial.printf("[esp] talk button GPIO%d (hold to talk)\n", BTN_TALK);
+  Serial.printf("[esp] button GPIO%d: tap (<%d ms) = dashboard/chat, hold = talk; debounce %d ms\n",
+                BTN_TALK, REC_MIN_MS, BTN_DEBOUNCE_MS);
+  Serial.println(F("[esp] screen: dashboard"));
   rfidBegin(onRfidCardDetected);
   Serial.println(F("[esp] ready"));
 }
 
 void loop() {
   // --- talk button -----------------------------------------------------------
+  // One button, two gestures:
+  //   tap  (released before REC_MIN_MS) -> switch dashboard <-> chat
+  //   hold (REC_MIN_MS or longer)       -> push-to-talk, from either screen
+  // Recording starts at the press, so a hold loses no speech; a tap's audio is
+  // discarded (REC:CANCEL tap). Presses while an answer is being prepared or
+  // spoken are ignored, as before.
+  static bool pressNoRec = false;              // pressed while the PC app was offline
+  static uint32_t pressMs = 0;
   const int edge = pollButton();
   if (edge == 1) {
     if (state == ST_IDLE && !aud.active && btnArmed) {
       btnArmed = false;                        // needs a release before the next press
+      pressMs = millis();
       if (!pcAlive()) {
-        Serial.println(F("[esp] button pressed - ignored: PC app not connected"));
-        setMood(MOOD_SLEEPY);
-        bubbleMessage("Zzz...", "I need the PC app to answer. Start it with start.ps1, then ask again.", COL_MUTE);
-        drawTitleBar("PC offline");
+        pressNoRec = true;                     // a tap still switches screens
+        Serial.println(F("[esp] button pressed - PC app not connected, not recording"));
       } else {
         Serial.println(F("[esp] button pressed - recording"));
         startRecording(true, REC_MAX_MS);
@@ -1406,6 +1723,16 @@ void loop() {
     if (state == ST_RECORDING && recFromButton) {
       Serial.printf("[esp] button released after %lu ms\n", (unsigned long)(millis() - recStartMs));
       stopRecording();
+    } else if (pressNoRec) {
+      pressNoRec = false;
+      if (millis() - pressMs < REC_MIN_MS) {
+        toggleScreen();
+      } else {
+        enterChat();
+        setMood(MOOD_SLEEPY);
+        bubbleMessage("Zzz...", "I need the PC app to answer. Start it with start.ps1, then ask again.", COL_MUTE);
+        drawTitleBar("PC offline");
+      }
     }
   }
 
@@ -1415,6 +1742,13 @@ void loop() {
 
   if (state == ST_RECORDING) {
     pumpMic();
+    if (recFromButton && !recShown && millis() - recStartMs >= REC_MIN_MS) {
+      recShown = true;                         // a hold: this is a question
+      enterChat();                             // pumps the mic between its drawing steps
+      pumpMic();
+      drawListening("Listening... speak now");
+      pumpMic();
+    }
     if (millis() - recStartMs >= recLimitMs) {
       if (recFromButton) Serial.println(F("[esp] recording hit the time limit"));
       stopRecording();
@@ -1446,15 +1780,23 @@ void loop() {
   // --- PC link indicator -----------------------------------------------------
   if (state == ST_IDLE && !aud.active && pcAlive() != pcShownAlive) {
     pcShownAlive = pcAlive();
-    drawTitleBar(pcShownAlive ? "ready" : "PC offline");
-    if (!pcShownAlive) {
-      setMood(MOOD_SLEEPY);
-      drawOfflineBubble();
-    } else if (mood == MOOD_SLEEPY) {
-      setMood(MOOD_IDLE);
-      drawIdleBubble();
+    if (ui == UI_CHAT) {
+      drawTitleBar(pcShownAlive ? "ready" : "PC offline");
+      if (!pcShownAlive) {
+        setMood(MOOD_SLEEPY);
+        drawOfflineBubble();
+      } else if (mood == MOOD_SLEEPY) {
+        setMood(MOOD_IDLE);
+        drawIdleBubble();
+      }
+    } else {
+      mood = pcShownAlive ? (mood == MOOD_SLEEPY ? MOOD_IDLE : mood) : MOOD_SLEEPY;
+      dashUpdate();
     }
   }
+
+  // --- dashboard: age counter and link state, once a second -----------------
+  if (ui == UI_DASH && state == ST_IDLE && !aud.active) dashTick();
 
   forwardRfidEvents();
 

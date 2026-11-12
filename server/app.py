@@ -1,7 +1,7 @@
 """Smart Krishi server: agricultural RAG + Gemma Q&A for the ESP32 voice kiosk.
 
 Same pipeline as Campus Mithra's server/app.py, with an agricultural knowledge
-base, prompt and fallbacks, and a soil-sensor endpoint for the second ESP32.
+base, prompt and fallbacks, and live readings from the UNO Q farm sensor device.
 
 Reused unchanged from Campus Mithra: rag.py (hybrid embeddings + TF-IDF
 retrieval), llm.py (Gemma via Gemini API or Ollama), grounding.py (every answer
@@ -16,8 +16,8 @@ Endpoints (all under /api/krishi):
     POST /voice                  recording -> answer, in one call
     POST /understand             typed Kannada/English -> English + display text
     GET  /audio/{id}.{mp3|s16|u8}  the spoken answer
-    POST /soil-data              reading from the soil sensor ESP32
-    GET  /soil-data/latest       newest reading (real, else mock if SOIL_MOCK=1)
+    POST /sensors                reading from the UNO Q sensor device (device token)
+    GET  /sensors/latest         newest reading, validity, online/stale/offline
 """
 import asyncio, json, logging, os, re, uuid
 from collections import OrderedDict
@@ -31,9 +31,11 @@ load_dotenv(ROOT / ".env", override=True)
 
 from fastapi import APIRouter, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from typing import Annotated
+from pydantic import BaseModel, Field, model_validator
 
-import language, llm, soil, speech
+import hmac
+import language, llm, sensors, speech
 from grounding import grounded_sources
 from prompts import PROMPT
 from rag import Retriever
@@ -53,6 +55,8 @@ DONT_KNOW = ("I don't have enough verified information to answer that. "
 BROKEN = "Sorry, I couldn't put that answer together just now. Please ask me again."
 UNHEARD = "Sorry, I couldn't hear that clearly. Please try again and speak close to the microphone."
 DEAF = "Sorry, my speech service is not working right now. Please try again in a little while."
+NO_SENSOR_DATA = "I have not received any readings from the farm sensor device yet, so I cannot tell you the farm conditions."
+SENSOR_SOURCE = "live_sensors"     # how the sensor section is named in the prompt and in sources
 GREET = re.compile(r"^\W*(hi|hello|hey|namaste|namaskara|namaskar|good (morning|afternoon|evening))\b[\s\W]*(krishi|there)?\W*$", re.I)
 THANKS = re.compile(r"^\W*(thanks|thank you|thank you very much|ok thanks|dhanyavada|bye|goodbye)\W*$", re.I)
 
@@ -68,7 +72,8 @@ async def lifespan(_: FastAPI):
         Retriever, KB_DIR, os.getenv("OLLAMA_URL", "http://localhost:11434"), os.getenv("EMBED_MODEL", ""),
         ROOT / "server" / ".cache", float(os.getenv("EMB_MIN_SCORE", "0.40")), float(os.getenv("TFIDF_MIN_SCORE", "0.08")))
     log.info("Agricultural knowledge base: %d chunks from %s", len(RET.chunks), KB_DIR)
-    log.info("Speech-to-text provider: %s | soil mock readings: %s", speech.provider(), soil.mock_enabled())
+    log.info("Speech-to-text provider: %s | sensor ingestion %s", speech.provider(),
+             "on" if os.getenv("KRISHI_SENSOR_TOKEN", "").strip() else "OFF (set KRISHI_SENSOR_TOKEN)")
     warm = asyncio.create_task(asyncio.to_thread(speech.warmup))
     try:
         yield
@@ -184,24 +189,28 @@ async def answer_question(q: str, sid: str = "web") -> dict:
     hits, relevant = await asyncio.to_thread(RET.search, rq)
     hits = list(hits)
 
-    # Soil questions also see the latest sensor reading (real, else a labelled mock).
-    sensor = None
-    if soil.SOIL_WORDS.search(q):
-        rec = soil.latest()
+    # Farm-condition questions also see the latest sensor reading, in its own
+    # prompt section, kept apart from the knowledge documents.
+    sensor, sensor_hit = None, None
+    if sensors.SENSOR_WORDS.search(q):
+        rec = sensors.latest()
         if rec:
-            sensor = {k: rec.get(k) for k in ("device_id", "source", "received_at", "soil_moisture",
-                                               "crop", "temperature", "humidity")}
-            hits.insert(0, soil.as_context(rec))
+            sensor = {"device_id": rec["device_id"], "status": sensors.status(rec),
+                      "received_at": rec["received_at"], "is_test_data": bool(rec.get("is_test_data"))}
+            sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm sensor readings", "text": sensors.as_context(rec)}
             relevant = True
+        elif not relevant or sensors.LIVE_INTENT.search(q):
+            return pack(q, NO_SENSOR_DATA, False, via="no-sensor-data")
     if not relevant:
         return pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     ctx = "\n\n".join(f"[{h['source']}] {h['title']}\n{h['text']}" for h in hits)
+    live = sensor_hit["text"] if sensor_hit else "No live sensor reading is available for this question."
     try:
-        raw = await llm.generate(PROMPT.format(context=ctx, question=q))
+        raw = await llm.generate(PROMPT.format(sensors=live, context=ctx, question=q))
     except Exception as e:
         log.error("LLM error: %s", e)
-        found = extractive_answer(q, [h for h in hits if h["source"] != "soil_sensor.md"])
+        found = extractive_answer(q, hits)
         if found:
             log.info("answered from the knowledge base directly (Gemma unavailable)")
             return pack(q, found[0], True, [found[1]], via="kb-direct", sensor=sensor)
@@ -210,9 +219,12 @@ async def answer_question(q: str, sid: str = "web") -> dict:
         return pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     answer, cited = llm.split_sources(raw)
-    sources = grounded_sources(answer, hits)
+    if sensor_hit and SENSOR_SOURCE in raw.rsplit("\n", 1)[-1]:
+        cited.insert(0, SENSOR_SOURCE)
+    sources = grounded_sources(answer, hits + ([sensor_hit] if sensor_hit else []))
     if sources is None:
-        # Catches invented quantities: any number not in the retrieved text fails.
+        # Catches invented quantities and readings: any number that is not in
+        # the documents or the sensor section fails.
         log.info("rejected ungrounded answer: %r", answer[:200])
         return pack(q, DONT_KNOW, False, via="ungrounded", sensor=sensor)
     sources = [s for s in cited if s in sources] or sources
@@ -254,12 +266,29 @@ class Understand(BaseModel):
     text: str = Field(max_length=1000)
 
 
-class SoilReading(BaseModel):
+class SensorReading(BaseModel):
+    """One reading from the UNO Q sensor device. null = not measured / invalid."""
+    model_config = {"extra": "forbid"}
     device_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_\-]+$")
-    soil_moisture: float = Field(ge=0, le=100)
+    temperature_c: float | None = Field(default=None, ge=-40, le=85)
+    humidity_percent: float | None = Field(default=None, ge=0, le=100)
+    soil_moisture_raw: int | None = Field(default=None, ge=0, le=65535)
+    soil_moisture_percent: float | None = Field(default=None, ge=0, le=100)
+    soil_sensor_valid: bool = False
+    mq135_raw: int | None = Field(default=None, ge=0, le=65535)
+    mq135_valid: bool = True
+    faults: list[Annotated[str, Field(max_length=40)]] = Field(default_factory=list, max_length=12)
     crop: str | None = Field(default=None, max_length=40)
-    temperature: float | None = Field(default=None, ge=-20, le=70)
-    humidity: float | None = Field(default=None, ge=0, le=100)
+    seq: int | None = Field(default=None, ge=0)
+    uptime_s: int | None = Field(default=None, ge=0)
+    is_test_data: bool = False
+
+    @model_validator(mode="after")
+    def _no_percent_without_calibration(self):
+        # A percentage only means something from a calibrated, valid sensor.
+        if not self.soil_sensor_valid:
+            self.soil_moisture_percent = None
+        return self
 
 
 @api.post("/chat")
@@ -331,25 +360,33 @@ async def audio(aid: str, ext: str):
         return Response(status_code=503)
 
 
-@api.post("/soil-data")
-async def soil_data(body: SoilReading, x_device_key: str | None = Header(default=None)):
-    """A real reading from the soil sensor ESP32. If KRISHI_SENSOR_KEY is set,
-    the node must send it in the X-Device-Key header."""
-    key = os.getenv("KRISHI_SENSOR_KEY", "").strip()
-    if key and x_device_key != key:
-        raise HTTPException(status_code=401, detail="Missing or wrong X-Device-Key.")
-    rec = soil.save(body.model_dump())
-    log.info("soil reading from %s: moisture %s", rec["device_id"], rec["soil_moisture"])
-    return {"ok": True, "reading": rec}
+def _sensor_token_ok(authorization: str | None, x_device_token: str | None) -> bool:
+    expected = os.getenv("KRISHI_SENSOR_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Sensor ingestion is off: set KRISHI_SENSOR_TOKEN in .env.")
+    given = x_device_token or ""
+    if not given and authorization and authorization.lower().startswith("bearer "):
+        given = authorization[7:]
+    return hmac.compare_digest(given.strip().encode(), expected.encode())
 
 
-@api.get("/soil-data/latest")
-async def soil_latest(device_id: str | None = None):
-    rec = soil.latest(device_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="No soil reading yet (SOIL_MOCK=0).")
-    return {"reading": rec, "is_mock": rec.get("source") == "mock",
-            "age_minutes": round(soil.age_minutes(rec), 1)}
+@api.post("/sensors")
+async def sensors_ingest(body: SensorReading, authorization: str | None = Header(default=None),
+                         x_device_token: str | None = Header(default=None)):
+    """A reading from the Arduino UNO Q sensor device (Authorization: Bearer <KRISHI_SENSOR_TOKEN>)."""
+    if not _sensor_token_ok(authorization, x_device_token):
+        raise HTTPException(status_code=401, detail="Missing or wrong device token.")
+    rec = sensors.save(body.model_dump())
+    log.info("sensor %s seq=%s: T=%s RH=%s soil_raw=%s valid=%s mq135_raw=%s faults=%s", rec["device_id"],
+             rec["seq"], rec["temperature_c"], rec["humidity_percent"], rec["soil_moisture_raw"],
+             rec["soil_sensor_valid"], rec["mq135_raw"], ",".join(rec["faults"]) or "-")
+    return {"ok": True, "received_at": rec["received_at"]}
+
+
+@api.get("/sensors/latest")
+async def sensors_latest(device_id: str | None = None):
+    """Latest reading, server time, per-measurement validity and online/stale/offline status."""
+    return sensors.summary(device_id)
 
 
 @api.get("/health")
@@ -360,7 +397,8 @@ async def health():
     return {"ok": True, "app": "Smart Krishi", "college": META["name"], "kb": str(KB_DIR.name),
             "chunks": len(RET.chunks), "embeddings": RET.E is not None, "backend": backend, "model": model,
             "stt": speech.provider(), "embed_model": RET.model or None,
-            "languages": language.enabled(), "soil_mock": soil.mock_enabled()}
+            "languages": language.enabled(), "sensor_ingestion": bool(os.getenv("KRISHI_SENSOR_TOKEN", "").strip()),
+            "sensor_status": sensors.status(sensors.latest())}
 
 
 app.include_router(api)

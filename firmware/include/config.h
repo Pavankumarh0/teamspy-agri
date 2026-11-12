@@ -13,8 +13,8 @@
 
 // ---------- TALK BUTTON ----------
 #define BTN_TALK          27
-#define BTN_DEBOUNCE_MS   25
-#define REC_MIN_MS        400      // shorter presses are ignored (an accidental tap)
+#define BTN_DEBOUNCE_MS   50       // 40-60 ms recommended for this push button
+#define REC_MIN_MS        400      // shorter = a tap (switches dashboard/chat); longer = talk
 #define REC_MAX_MS        15000    // recording stops here even if still held
 
 // ---------- INMP441 MICROPHONE ----------
@@ -53,6 +53,11 @@
 // ---------- PC LINK HEALTH ----------
 #define PC_ALIVE_MS       7000     // the PC sends HB every 2 s; silence longer = offline
 #define BUSY_TIMEOUT_MS   90000    // longest wait for an answer after releasing
+
+// ---------- FARM DASHBOARD ----------
+// Readings arrive from the PC app as D: lines every ~5 s (krishi_client.py).
+#define DASH_REFRESH_MS       1000   // "updated N s ago" and link status redraw
+#define DASH_DATA_TIMEOUT_MS  15000  // no D: line for this long = "waiting for data"
 
 // ---------- RFID CARD READER LINK (UNO Q -> ESP32, receive only) ----------
 // Frames "RFID:<UID>\n" from the UNO Q's Serial1 (D1/TX). docs/RFID_PROTOCOL.md

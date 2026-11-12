@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to config.json and fill in. config.json is not committed (it holds the token).",
+  "backend_url": "http://192.168.1.10:8001",
+  "device_token": "",
+  "device_id": "unoq_soil_01",
+  "crop": "tomato",
+  "_soil_calibration": "Raw ADC with the probe in dry soil and in wet soil (see README). null = not calibrated: no percentage is sent.",
+  "soil_dry_raw": null,
+  "soil_wet_raw": null,
+  "timeout_s": 4
+}

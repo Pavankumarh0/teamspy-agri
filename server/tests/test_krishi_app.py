@@ -14,13 +14,16 @@ sys.path.insert(0, str(SERVER))
 import dotenv  # noqa: E402
 dotenv.load_dotenv = lambda *a, **k: None
 _tmp = tempfile.mkdtemp()
-os.environ.update({"EMBED_MODEL": "", "LLM_BACKEND": "gemini", "SOIL_MOCK": "1", "TTS_ENABLED": "1",
-                   "TFIDF_MIN_SCORE": "0.10", "SOIL_STORE": os.path.join(_tmp, "soil.json"),
+TOKEN = "test-device-token"
+os.environ.update({"EMBED_MODEL": "", "LLM_BACKEND": "gemini", "TTS_ENABLED": "1", "KRISHI_SENSOR_TOKEN": TOKEN,
+                   "TFIDF_MIN_SCORE": "0.10", "SENSOR_STORE": os.path.join(_tmp, "sensors.json"),
+                   "SENSOR_STALE_S": "30", "SENSOR_OFFLINE_S": "120",
                    "KRISHI_SENSOR_KEY": "", "SARVAM_API_KEY": "", "STT_PROVIDER": "sarvam"})
 
 from fastapi.testclient import TestClient  # noqa: E402
 import app as krishi  # noqa: E402
-import soil  # noqa: E402
+import sensors  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 
 def gemma(reply):
@@ -38,7 +41,7 @@ class KrishiApiTests(unittest.TestCase):
         cls.ctx.__exit__(None, None, None)
 
     def setUp(self):
-        soil._latest.clear()
+        sensors.reset()
         krishi.LAST_Q.clear()
 
     def ask(self, q):
@@ -90,49 +93,102 @@ class KrishiApiTests(unittest.TestCase):
         self.assertIn("blossom end rot", r["answer"].lower())
         self.assertIn("06_tomato_leaf_problems.md", r["sources"] + ["05_tomato_cultivation.md"])
 
-    def test_soil_question_gets_a_labelled_mock_reading(self):
-        with gemma("NOT_IN_KB") as g:
-            r = self.ask("When should I water my crops? Is the soil dry?")
+    # --- sensors -------------------------------------------------------------
+
+    PAYLOAD = {"device_id": "unoq_soil_01", "temperature_c": 28.5, "humidity_percent": 31,
+               "soil_moisture_raw": 16363, "soil_moisture_percent": None, "mq135_raw": 1748,
+               "soil_sensor_valid": False}
+    AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+    def post(self, body=None, headers=None):
+        return self.c.post("/api/krishi/sensors", json=body or self.PAYLOAD,
+                           headers=self.AUTH if headers is None else headers)
+
+    def test_sensor_payload_from_the_spec_is_accepted_and_returned(self):
+        self.assertEqual(self.post().status_code, 200)
+        r = self.c.get("/api/krishi/sensors/latest").json()
+        self.assertEqual(r["status"], "online")
+        self.assertEqual(r["reading"]["temperature_c"], 28.5)
+        self.assertEqual(r["reading"]["mq135_raw"], 1748)
+        self.assertFalse(r["valid"]["soil_moisture"])
+        self.assertTrue(r["valid"]["temperature"])
+        self.assertIn("server_time", r)
+        self.assertLess(r["age_seconds"], 5)
+
+    def test_sensor_auth(self):
+        self.assertEqual(self.post(headers={}).status_code, 401)
+        self.assertEqual(self.post(headers={"Authorization": "Bearer wrong"}).status_code, 401)
+        self.assertEqual(self.post(headers={"X-Device-Token": TOKEN}).status_code, 200)
+        with mock.patch.dict(os.environ, {"KRISHI_SENSOR_TOKEN": ""}):
+            self.assertEqual(self.post().status_code, 503)       # never open when unconfigured
+
+    def test_sensor_validation(self):
+        for bad in ({"humidity_percent": 140}, {"device_id": "bad id"}, {"soil_moisture_raw": -1},
+                    {"temperature_c": 200}, {"unknown_field": 1}):
+            self.assertEqual(self.post({**self.PAYLOAD, **bad}).status_code, 422, bad)
+
+    def test_nulls_are_allowed_and_percent_needs_a_valid_sensor(self):
+        body = {"device_id": "unoq_soil_01", "temperature_c": None, "humidity_percent": None,
+                "soil_moisture_raw": None, "mq135_raw": None, "soil_moisture_percent": 55, "soil_sensor_valid": False}
+        self.assertEqual(self.post(body).status_code, 200)
+        r = self.c.get("/api/krishi/sensors/latest").json()
+        self.assertIsNone(r["reading"]["soil_moisture_percent"])  # dropped: sensor not valid
+        self.assertFalse(any(r["valid"].values()))
+
+    def test_no_data_status(self):
+        r = self.c.get("/api/krishi/sensors/latest").json()
+        self.assertEqual(r["status"], "no_data")
+        self.assertIsNone(r["reading"])
+
+    def test_stale_and_offline_status_and_context(self):
+        now = datetime.now(timezone.utc)
+        for secs, want, word in ((10, "online", None), (60, "stale", "STALE"), (600, "offline", "OFFLINE")):
+            sensors.reset()
+            rec = sensors.save(dict(self.PAYLOAD), now=now - timedelta(seconds=secs))
+            self.assertEqual(sensors.status(rec, now), want)
+            if word:
+                self.assertIn(word, sensors.as_context(rec, now))
+
+    def test_reading_survives_a_restart(self):
+        self.post()
+        sensors._latest.clear()
+        sensors._loaded = False                                   # as after a restart
+        self.assertEqual(sensors.latest()["mq135_raw"], 1748)
+
+    def test_farm_question_gets_sensor_section_separate_from_documents(self):
+        self.post()
+        reply = ("The air temperature is 28.5 degrees Celsius and humidity is 31 percent. The soil moisture "
+                 "sensor is not calibrated yet, so the soil water level cannot be assessed reliably."
+                 "\nSOURCES: live_sensors")
+        with gemma(reply) as g:
+            r = self.ask("How is my farm today?")
         prompt = g.call_args.args[0]
-        self.assertIn("[soil_sensor.md]", prompt)
-        self.assertIn("MOCK READING (simulated, not a real measurement)", prompt)
-        self.assertEqual(r["sensor"]["source"], "mock")
+        live = prompt.split("LIVE SENSOR READINGS:\n", 1)[1].split("KNOWLEDGE DOCUMENTS:\n")[0]
+        docs = prompt.split("KNOWLEDGE DOCUMENTS:\n", 1)[1]
+        self.assertIn("Air temperature: 28.5 degrees Celsius", live)
+        self.assertIn("not calibrated", live)
+        self.assertNotIn("1748", live)                          # raw MQ-135 is never offered as a value
+        self.assertNotIn("Air temperature", docs)
+        self.assertEqual(r["via"], "gemma")
+        self.assertIn("live_sensors", r["sources"])
+        self.assertIn("28.5", r["answer"])
 
-    def test_real_reading_replaces_the_mock_and_is_labelled_real(self):
-        body = {"device_id": "krishi_sensor_01", "soil_moisture": 31, "crop": "tomato", "temperature": 29, "humidity": 60}
-        self.assertEqual(self.c.post("/api/krishi/soil-data", json=body).status_code, 200)
-        latest = self.c.get("/api/krishi/soil-data/latest").json()
-        self.assertFalse(latest["is_mock"])
-        self.assertEqual(latest["reading"]["soil_moisture"], 31)
-        with gemma("NOT_IN_KB") as g:
-            self.ask("What is the soil moisture now?")
-        context = g.call_args.args[0].split("CONTEXT:", 1)[1]
-        self.assertIn("REAL SENSOR READING", context)
-        self.assertIn("Soil moisture: 31 percent", context)
-        self.assertNotIn("MOCK READING", context)
+    def test_invented_sensor_value_is_rejected(self):
+        self.post()
+        with gemma("The soil moisture is 42 percent, so your soil is fine.\nSOURCES: live_sensors"):
+            r = self.ask("What is the soil moisture now?")
+        self.assertEqual(r["via"], "ungrounded")
 
-    def test_mock_reading_is_flagged_when_nothing_real_arrived(self):
-        latest = self.c.get("/api/krishi/soil-data/latest").json()
-        self.assertTrue(latest["is_mock"])
-        self.assertEqual(latest["reading"]["source"], "mock")
+    def test_farm_question_without_any_reading_says_so(self):
+        with gemma("should not be called") as g:
+            r = self.ask("How is my farm today?")
+        g.assert_not_called()
+        self.assertEqual(r["answer"], krishi.NO_SENSOR_DATA)
 
-    def test_no_mock_and_no_reading_is_404(self):
-        with mock.patch.dict(os.environ, {"SOIL_MOCK": "0"}):
-            self.assertEqual(self.c.get("/api/krishi/soil-data/latest").status_code, 404)
-
-    def test_soil_data_validation_and_device_key(self):
-        bad = {"device_id": "x y", "soil_moisture": 140}
-        self.assertEqual(self.c.post("/api/krishi/soil-data", json=bad).status_code, 422)
-        good = {"device_id": "krishi_sensor_01", "soil_moisture": 40}
-        with mock.patch.dict(os.environ, {"KRISHI_SENSOR_KEY": "s3cret"}):
-            self.assertEqual(self.c.post("/api/krishi/soil-data", json=good).status_code, 401)
-            ok = self.c.post("/api/krishi/soil-data", json=good, headers={"X-Device-Key": "s3cret"})
-            self.assertEqual(ok.status_code, 200)
-
-    def test_stale_reading_is_marked(self):
-        rec = soil.save({"device_id": "krishi_sensor_01", "soil_moisture": 40})
-        rec["received_at"] = "2020-01-01T00:00:00+00:00"
-        self.assertIn("STALE", soil.as_context(rec)["text"])
+    def test_test_data_is_labelled(self):
+        self.post({**self.PAYLOAD, "is_test_data": True})
+        self.assertIn("TEST DATA", sensors.as_context(sensors.latest()))
+        self.assertTrue(self.c.get("/api/krishi/sensors/latest").json()["is_test_data"])
 
     def test_greeting(self):
         self.assertEqual(self.ask("Namaskara")["answer"], krishi.META["greeting"])

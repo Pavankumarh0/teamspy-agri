@@ -41,7 +41,7 @@ Start-Process powershell -ArgumentList '-NoExit', '-NoProfile', '-Command', $ser
 
 Write-Host "Starting the server" -NoNewline
 $up = $false
-for ($i = 0; $i -lt 60; $i++) {
+for ($i = 0; $i -lt 180; $i++) {
     try {
         $h = Invoke-RestMethod http://127.0.0.1:8001/api/krishi/health -TimeoutSec 2
         $up = $true

@@ -1,161 +1,186 @@
 # Smart Krishi Assistant
 
-An AI voice assistant for farmers, built on the **Campus Mithra** kiosk. A farmer
-holds the button, asks a question in English or Kannada, and hears a grounded
-answer from an agricultural knowledge base. The answer also appears on the screen.
+An AI farm assistant built on the **Campus Mithra** kiosk, with two devices:
+
+- **Device 1, ESP32 voice kiosk:** a farm **dashboard** on the TFT (temperature,
+  humidity, soil moisture, MQ-135) and a **voice chatbot**. Tap the button to switch
+  screens; hold it to ask a question in English, Kannada or Hindi.
+- **Device 2, Arduino UNO Q sensor collector:** reads a DHT11, an HW-080 soil probe
+  and an MQ-135 every 5 s and posts them to the Smart Krishi server.
 
 ```
- talk button ─► INMP441 ─► ESP32 ──USB serial 921600──► PC: krishi_client.py
-                            │ ▲                              │
-                            │ │                    server/app.py (FastAPI, :8001)
-                            │ │                    Sarvam STT → Kannada↔English
-                            │ │                    RAG over kb/ → Gemma → grounding check
-                            │ └── 16 kHz speech ◄── edge-tts
-                            ├──► TFT  "SMART KRISHI": question, answer, source
-                            └──► MAX98357A ─► speaker
+ UNO Q  STM32 sketch ──Bridge.notify──► Linux: python/main.py ──Wi-Fi HTTP POST──┐
+        DHT11 D2, soil A0, MQ-135 A1     (App Lab app smart-krishi-sensors)      │
+                                                                                  ▼
+                                              PC: server/app.py (FastAPI :8001)
+                                              /api/krishi/sensors  ← readings + device token
+                                              /api/krishi/chat     ← RAG over kb/ + live readings → Gemma
+                                                         ▲   │
+                                   GET /sensors/latest   │   │  answer, speech
+                                   every 5 s (thread)    │   ▼
+ ESP32 kiosk ◄────────USB serial 921600──────────── PC: krishi_client.py
+   TFT: dashboard ⇄ chat   button: tap = switch, hold = talk
+   INMP441 mic ──► (question audio) ──► Sarvam STT
+   MAX98357A ◄── 16 kHz speech ◄── edge-tts
 ```
+
+**The ESP32 has no Wi-Fi in this design.** It already depends on the PC for
+speech and Gemma over USB, and the backend runs on that same PC, so the PC client
+fetches the readings and sends them to the ESP32 as a `D:` line. That means no
+Wi-Fi credentials on the ESP32 and no blocking HTTP next to the audio code. The
+dashboard shows the link status instead: *PC*, *Server* and *Sensor
+online/stale/offline*. The UNO Q is the device that uses Wi-Fi, through its Linux side.
 
 ## What is reused from Campus Mithra
 
 Campus Mithra (`Documents/PlatformIO/Projects/Campus-Mithra`) is **not modified**.
-This is a separate project; the working pieces were copied in:
 
 | Piece | Here | From Campus Mithra | Changes |
 |---|---|---|---|
-| RAG retrieval (Gemini embeddings + TF-IDF, cached) | `server/rag.py` | `server/rag.py` | none |
-| Gemma (Gemini API or Ollama, retries, fallback model) | `server/llm.py` | `server/llm.py` | none (its campus `PROMPT` is unused) |
-| Grounding check (every sentence and **every number** must appear in the retrieved text) | `server/grounding.py` | same | none |
-| Speech: Sarvam/Whisper STT, edge-tts, 16-bit PCM for the MAX98357A | `server/speech.py` | same | none |
-| Kannada ↔ English (Sarvam), Latin script for the TFT | `server/language.py` | same | none |
-| IST date helper | `server/campus_time.py` | same | none |
-| ESP32 firmware (pins, I2S mic/amp, USB protocol, screens) | `firmware/` | `firmware/` | branding text only, separate build dir |
-| PC ⇄ ESP32 bridge | `krishi_client.py` | `pc_client.py` | `/api/krishi/*` endpoints; Firestore campus lookup, QR maps and RFID removed |
-| Launcher, hardware self-test | `start.ps1`, `scripts/esp32_selftest.py` | same | names, port, sample text |
+| RAG retrieval (Gemini embeddings + TF-IDF) | `server/rag.py` | `server/rag.py` | none |
+| Gemma (Gemini API or Ollama) | `server/llm.py` | same | none |
+| Grounding check (every sentence and **number** must be in the evidence) | `server/grounding.py` | same | none |
+| Speech (Sarvam/Whisper STT, edge-tts), Kannada/Hindi | `server/speech.py`, `language.py` | same | none |
+| ESP32 firmware: pins, I2S mic/amp, USB protocol, chat screen | `firmware/` | `firmware/` | branding; dashboard and tap/hold added |
+| PC ⇄ ESP32 bridge | `krishi_client.py` | `pc_client.py` | `/api/krishi/*`; dashboard poller; campus/QR/RFID removed |
+| UNO Q sensor sketch | `unoq/smart-krishi-sensors/sketch` | your App Lab app `test-moisture` | same pins and DHT11; filtering, validity, Bridge |
 
-New for Smart Krishi: `server/app.py` (agricultural API), `server/prompts.py`
-(farming rules: no invented doses, explain the reason, label mock sensor data),
-`server/soil.py` (soil sensor store), `kb/` (agricultural documents) and tests.
+## Wiring
 
-The two projects have **separate knowledge bases, `.env` files, ports
-(Campus 8000, Krishi 8001), virtual environments and firmware build folders**.
+### ESP32 kiosk (unchanged)
+ILI9341 TFT 240×320, used in landscape (CS 5, DC 2, RST 4, MOSI 23, SCK 18,
+MISO 19), INMP441 (SCK 14, WS 15, SD 32), MAX98357A (BCLK 26, LRC 25, DIN 22),
+push button **GPIO27 → GND** (INPUT_PULLUP). Details: [docs/HARDWARE.md](docs/HARDWARE.md).
 
-## Hardware
+### UNO Q sensors (as in `test-moisture`)
 
-Identical to Campus Mithra: ESP32 DevKit, INMP441 (SCK 14, WS 15, SD 32),
-MAX98357A (BCLK 26, LRC 25, DIN 22), TFT ILI9341 (CS 5, DC 2, RST 4, MOSI 23,
-SCK 18, MISO 19), talk button GPIO27 to GND. No new parts and no rewiring. The
-link to the PC is the existing **USB serial** connection at 921600 baud, as on the
-working Campus Mithra kiosk. Full pin map and troubleshooting: [docs/HARDWARE.md](docs/HARDWARE.md).
+| Sensor | UNO Q | Supply | Notes |
+|---|---|---|---|
+| DHT11 DATA | D2 | 3.3 V or 5 V per module | the sketch uses `DHT11` (from `test-moisture`); change `DHTTYPE` for a DHT22 |
+| HW-080 soil AO | A0 | **3.3 V** | read as 14-bit raw (0–16383) |
+| MQ-135 AO | A1 **through a divider** | **5 V** heater supply, common GND | AO swings up to ~5 V: **never connect it straight to A1** |
 
-The screen shows `SMART KRISHI` in the title bar and these statuses on the right:
-`PC offline` (no connection), `ready`, `LISTENING` with a level bar, `PROCESSING`,
-`SPEAKING`, and errors (`mic error`, `speech error`, `server error`, `no answer`, `link error`).
-The face drawing is unchanged from Campus Mithra, graduation cap included.
+**MQ-135 divider:** AO → **10 kΩ** → A1 → **20 kΩ** → GND. That gives
+5 V × 20/(10+20) = **3.33 V at most** at A1. With standard values, 10 kΩ + 22 kΩ
+gives 3.44 V; 12 kΩ + 22 kΩ gives 3.24 V (the safest). Check the maximum with a
+multimeter before connecting A1. All grounds must be joined.
 
-## Setup (once)
+## Button and screens
+
+| Gesture | From the dashboard | From the chat screen |
+|---|---|---|
+| **Tap** (released before 0.4 s) | → chat screen | → dashboard |
+| **Hold** (0.4 s or more) | records → switches to chat → answer | records → answer |
+| Press while an answer is being prepared or spoken | ignored | ignored |
+
+- Debounce is 50 ms, and each press needs a release before the next.
+- Recording starts the moment the button goes down, so a hold loses no speech; a tap's audio is discarded (`REC:CANCEL tap`).
+- LISTENING appears only once the press is long enough to count as a hold, so a tap never flashes the chat screen.
+- The ESP32 boots into the dashboard.
+- Switching screens never resets the board. The chat screen keeps the last answer, so you can tap back to it.
+
+**Dashboard:** title, four cards (temperature, humidity, soil moisture, MQ-135
+raw), sensor online/stale/offline, PC and server link, and "Updated N s ago".
+- Missing values show `--`.
+- The soil card shows `Not calibrated` plus the raw value until the UNO Q sends a calibrated percentage. A raw value of 16319 or more adds "check probe".
+- MQ-135 is always labelled *raw, uncalibrated, not ppm*.
+- When the sensor is stale or offline, the server is unreachable or the PC app stops, values stay on screen dimmed and marked *last known*.
+- Only changed fields are repainted, so there is no flicker.
+
+**Chat screen:** "SMART KRISHI AI" heading, LISTENING with a level meter,
+PROCESSING with thinking dots, SPEAKING with lip-sync, the recognised question and
+the answer, wrapped and paged. Same as Campus Mithra.
+
+## Setup
 
 ```powershell
 cd C:\Users\"Pavan Kumar H"\Documents\projects\amc-agri
 py -3.13 -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
-copy .env.example .env      # then add GEMINI_API_KEY and SARVAM_API_KEY
+copy .env.example .env
 ```
 
-The keys are the same as for Campus Mithra (Google AI Studio for Gemma and
-embeddings, Sarvam for speech-to-text and Kannada translation). edge-tts needs
-internet access.
+In `.env`: `GEMINI_API_KEY` and `SARVAM_API_KEY` (as for Campus Mithra), and
+`KRISHI_SENSOR_TOKEN` — generate one with
+`python -c "import secrets; print(secrets.token_urlsafe(24))"`. Without a token, sensor
+ingestion is switched off (HTTP 503).
 
-## Flash the ESP32
-
-Close anything holding the COM port (serial monitor, a running client), then:
-
+### Flash the ESP32
 ```powershell
 cd firmware
-C:\Users\"Pavan Kumar H"\.platformio\penv\Scripts\pio.exe run -t upload     # COM9, as in platformio.ini
-C:\Users\"Pavan Kumar H"\.platformio\penv\Scripts\pio.exe device monitor     # 921600 baud; expect "[esp] Smart Krishi kiosk - push-to-talk"
+C:\Users\"Pavan Kumar H"\.platformio\penv\Scripts\pio.exe run -t upload    # COM9
 ```
+Expect `[esp] screen: dashboard` and `button GPIO27: tap ... hold = talk` in the monitor.
 
-Or use the PlatformIO "Upload" button in VS Code with this `firmware/` folder open.
-If the board is not on COM9, change `upload_port`/`monitor_port` in
-`firmware/platformio.ini`. If the screen is blank or the colours are wrong, flash
-`-e mithra_st7789`. The build needs the `C:\pio` junction that Campus Mithra
-already uses (see the top of `platformio.ini`).
+### Install the UNO Q app (Arduino App Lab)
+1. In App Lab, create an app `smart-krishi-sensors`, or copy the folder
+   `unoq/smart-krishi-sensors` to the board's `~/ArduinoApps/`.
+2. On the board, copy `python/config.example.json` to `python/config.json` and fill in:
+   - `backend_url`: the PC's address, e.g. `http://10.185.75.17:8001` (`ipconfig` on the PC; both devices on the same Wi-Fi).
+   - `device_token`: the same value as `KRISHI_SENSOR_TOKEN`.
+   - `device_id`: `unoq_soil_01`, and optionally `crop`.
+3. Run the app: the App Lab **Run** button, or on the board `arduino-app-cli app start user:smart-krishi-sensors`. It replaces whichever app was running; `test-moisture` stays installed.
+4. The App Lab console shows `--- SMART KRISHI SENSOR DATA #n ---` from the sketch and `[krishi] sent #n` from Python.
 
-To switch the kiosk back to Campus Mithra, flash Campus Mithra's `firmware/`
-again. The two firmwares use the same protocol and differ only in branding.
+`config.json` is gitignored: the token is never in the code or the repo.
+
+**Soil calibration** (until it is done, the soil sensor is reported as not calibrated):
+1. Read the raw value with the probe in **dry** soil, then in **thoroughly wet** soil. Use the App Lab console or `GET /api/krishi/sensors/latest`.
+2. Put both in `config.json` as `soil_dry_raw` and `soil_wet_raw`, then restart the app.
+
+Investigate a reading pinned near 16383 first: a dry probe in air, a loose wire or the wrong pin all read like that.
 
 ## Run
 
 ```powershell
-.\start.ps1                 # server window + kiosk client on COM9
-.\start.ps1 -Port COM5      # another port
-.\start.ps1 -NoEsp32        # no kiosk: PC mic (Ctrl+Alt+4) and PC speakers
-```
-
-Then, on the kiosk, **hold the button, ask, let go**. Manual start:
-
-```powershell
-cd server; ..\.venv\Scripts\python app.py                     # http://127.0.0.1:8001
-..\.venv\Scripts\python krishi_client.py --esp32 COM9          # from the project root
-..\.venv\Scripts\python krishi_client.py --ask "When should I water my crops?" --esp32 none
-python scripts\esp32_selftest.py --port COM9                    # screen + speaker test, no server
+.\start.ps1                # server + kiosk client on COM9
 ```
 
 ## API (`server/app.py`)
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/krishi/health` | status, chunks, model, languages, mock flag |
-| POST | `/api/krishi/chat` | `{"question", "session", "language": "en"/"kn", "style"}` → `answer`, `sources`, `via`, `sensor`, `audio_id` |
-| POST | `/api/krishi/voice` | multipart `file` (WAV) → transcript + answer in one call |
-| POST | `/api/krishi/transcribe` | multipart `file` → text and language (the kiosk client uses this to show the question early) |
-| POST | `/api/krishi/understand` | typed Kannada/English → English + display text |
-| GET | `/api/krishi/audio/{id}.s16` | spoken answer, 16-bit 16 kHz (MAX98357A); also `.mp3`, `.u8` |
-| POST | `/api/krishi/soil-data` | soil sensor reading (below) |
-| GET | `/api/krishi/soil-data/latest` | newest reading, with `is_mock` and `age_minutes` |
+| POST | `/api/krishi/sensors` | sensor reading; header `Authorization: Bearer <KRISHI_SENSOR_TOKEN>` (or `X-Device-Token`) |
+| GET | `/api/krishi/sensors/latest` | `reading`, `server_time`, `received_at`, `age_seconds`, `status` (`online`/`stale`/`offline`/`no_data`), per-value `valid`, `is_test_data`; `?device_id=` optional |
+| POST | `/api/krishi/chat` | question → answer, `sources`, `via`, `sensor` |
+| POST | `/api/krishi/voice`, `/transcribe`, `/understand` | voice and language helpers |
+| GET | `/api/krishi/audio/{id}.s16` | spoken answer for the MAX98357A |
+| GET | `/api/krishi/health` | status, model, `sensor_ingestion`, `sensor_status` |
 
-`via` says how an answer was made: `gemma` (grounded), `unknown` (not enough
-verified information), `ungrounded` (Gemma's answer was rejected, for example
-because it contained a number not found in the knowledge base), `kb-direct`
-(Gemma was unreachable, so sentences were read verbatim from the knowledge base) or `error`.
-
-## Soil sensor (future second ESP32)
-
-The sensor node should POST JSON to `http://<PC IP>:8001/api/krishi/soil-data`:
+Sensor payload (every field except `device_id` may be `null` or left out):
 
 ```json
-{"device_id": "krishi_sensor_01", "soil_moisture": 42, "crop": "tomato", "temperature": 28, "humidity": 65}
+{"device_id": "unoq_soil_01", "temperature_c": 28.5, "humidity_percent": 31,
+ "soil_moisture_raw": 16363, "soil_moisture_percent": null, "soil_sensor_valid": false,
+ "mq135_raw": 1748, "mq135_valid": true, "faults": ["soil_saturated_high"],
+ "crop": "tomato", "seq": 12, "uptime_s": 60, "is_test_data": false}
 ```
 
-`soil_moisture` and `humidity` must be 0-100, and `device_id` may contain letters,
-digits, `_` and `-`. If `KRISHI_SENSOR_KEY` is set, the node must send it in an
-`X-Device-Key` header. The latest reading per device is kept in
-`server/data/soil_latest.json`.
+Validation rules:
+- Ranges: temperature −40 to 85, humidity and percent 0–100, raw values 0–65535.
+- Unknown fields are rejected with HTTP 422.
+- A `soil_moisture_percent` sent with `soil_sensor_valid: false` is dropped.
+- Readings are kept per device in `server/data/sensors_latest.json`, written atomically, so they survive a restart.
+- `online` means a reading in the last `SENSOR_STALE_S` (30 s); `stale` until `SENSOR_OFFLINE_S` (120 s); then `offline`.
 
-When a question mentions soil, moisture, watering or the sensor, the newest
-reading goes to Gemma as a `soil_sensor.md` section that carries its time and one
-of these labels:
-- `REAL SENSOR READING`: posted by a sensor.
-- `MOCK READING (simulated, not a real measurement)`: used only when `SOIL_MOCK=1` and no real reading exists. Gemma is told to say it is simulated, and the API marks it `"source": "mock"`.
-- `STALE`: added when a reading is older than `SOIL_MAX_AGE_MIN`.
+**Fault names:** `dht_read_failed`, `dht_out_of_range`, `soil_saturated_high`,
+`soil_near_zero`, `soil_noisy`, `mq135_saturated_high`, `mq135_near_zero`,
+`mq135_warming_up` (first 3 min), `mq135_noisy`.
 
-Set `SOIL_MOCK=0` once the real sensor is running.
+### Sensor readings in answers
+A farm-condition question ("How is my farm today?", "Is the soil dry?") gets the latest reading as a **separate** `LIVE SENSOR READINGS` block in the prompt, apart from the `KNOWLEDGE DOCUMENTS`:
+- It carries the reading's time, and labels STALE / OFFLINE / TEST DATA where they apply.
+- An uncalibrated soil sensor appears as "not calibrated" and an MQ-135 as "raw only, not ppm". The raw numbers are never offered as measurements.
+- The grounding check also covers sensor values, so an invented reading ("soil moisture is 42 percent") is rejected.
+- With no reading at all, the kiosk says it has not received any sensor data yet.
+- There is no weather source; nothing about weather is assumed.
 
-## Knowledge base (`kb/`)
+## Languages, loudness, knowledge base
 
-Eight Markdown files: soil health, moisture and irrigation, fertilizers,
-sustainable alternatives, tomato cultivation, tomato leaf problems, the sensor
-guide and where to get help. Each `##` section is one retrieval chunk. To add a
-document, drop a `.md` file with `##` sections into `kb/` and restart the server.
-Embeddings are rebuilt and cached automatically.
-
-**Status: starter content, not yet verified.** It was written for development
-from general agronomy guidance and must be checked against the official
-package of practices (UAS Bangalore / KVK / Department of Agriculture) before
-farmers rely on it. It deliberately contains **no fertilizer doses**: dose
-questions are answered with "depends on your soil test / Soil Health Card". If
-you add verified dose tables, Gemma may quote them, and the grounding check
-still rejects any number that is not in the documents.
+- **Languages:** English, Kannada and Hindi (`KIOSK_LANGUAGES=en,kn,hi`). Kanglish and Hinglish questions get Kanglish/Hinglish answers, and pure Kannada/Hindi get pure answers, as in Campus Mithra. The TFT shows Latin script.
+- **Speaker loudness:** `KIOSK_LOUDNESS` (default 6, 0 = Campus Mithra's level). It is a soft limiter applied before the firmware's 2x gain.
+- **Knowledge base (`kb/`)** is **starter content, not yet verified**, and has no fertilizer doses. Check it against the official package of practices (UAS Bangalore / KVK) before farmers rely on it.
+- **Back to Campus Mithra:** flash Campus Mithra's `firmware/` again.
 
 ## Tests
 
@@ -163,23 +188,19 @@ still rejects any number that is not in the documents.
 cd server; ..\.venv\Scripts\python -m unittest discover -s tests
 ```
 
-| Check | Result (12 Nov 2026) |
-|---|---|
-| Server unit tests (27): grounding, language, Krishi API, invented-dose rejection, soil mock/real/stale labels, sensor key, KB separation | pass |
-| Firmware compile (`pio run -e mithra_ili9341`) | pass (RAM 19%, flash 26%) |
-| Live RAG + Gemma (gemma-4-26b-a4b-it) on the six example questions | grounded answers with sources |
-| Dose trap ("how many kg of urea per acre") | no number invented; refers to soil test |
-| Off-topic, campus and market-price questions | "not enough verified information" |
-| Voice pipeline from synthesized WAV (English and Kannada): Sarvam STT → RAG → Gemma → Kannada reply → 16 kHz audio | pass |
-| `krishi_client.py --ask` against the server (no board) | pass |
-| Campus Mithra after the change: 21 server tests, kiosk tests, live `/api/ask` on :8000 | pass, repo unchanged |
-| **Microphone, speaker, button, display, USB link on the real ESP32** | **not tested: no board was connected** |
-| **Full button-to-speaker flow on the kiosk** | **not tested: needs the board** |
+| Check (12 Nov 2026) | How | Result |
+|---|---|---|
+| Server + client unit tests (39): sensor auth, validation, nulls, persistence, online/stale/offline, separate prompt block, invented-reading rejection, no-data reply, test-data label, `D:` line builder, grounding, languages | `unittest` | pass |
+| ESP32 firmware build | `pio run` | pass (RAM 19.3%, flash 26.5%, no warnings) |
+| ESP32 on the real board, over serial | flashed; script sends boot/`D:`/`Q:`/`A:`/`CLR`/`PING` | boots into the dashboard; 9 `D:` variants (spec payload, nulls, calibrated, stale, offline, server down, no data, test data, oversized garbage) parsed with no error; `Q:` switches to chat; still answers `PING` |
+| UNO Q app on the real board | App Lab built the sketch, flashed the STM32 and started Python | readings every 5 s: DHT11 28–30 °C / 24 % RH, MQ-135 raw ~1500–1700 (warm-up flag for the first 3 min), soil raw 16362–16372 → `soil_saturated_high`, **invalid, no percentage** |
+| UNO Q → server over Wi-Fi with device token | `POST /api/krishi/sensors` | HTTP 200; `/sensors/latest` shows `online` |
+| Server outage | server restarted during the run | status went `offline`; UNO Q backed off (2 → 30 s), then sent only the newest reading; back to `online` |
+| Live Gemma with real readings ("How is my farm today?", soil, air quality, irrigation amount, a normal KB question) | `/api/krishi/chat` | real temperature/humidity with time; soil "not calibrated"; MQ-135 "raw only"; probe warning; no irrigation amount invented; KB answers unchanged |
+| Campus Mithra | git status, its 21 server tests + 5 kiosk test files | unchanged, pass |
 
-### Hardware checklist (to do with the board connected)
-1. Flash and watch the monitor for `mic ... ok`, `speaker ... ok` and `mic slots: ... -> slot 0`.
-2. `python scripts\esp32_selftest.py --port COM9`: PING, screen pages, chime and speech.
-3. `.\start.ps1`: the title bar changes from `PC offline` to `ready`.
-4. Hold the button and ask "What causes yellow leaves in tomato plants?": you should see `LISTENING` → `PROCESSING` → the answer, and hear it spoken.
-5. Ask the same question in Kannada.
-6. If recognition is poor, listen to `server/debug/last_kiosk_mic.wav`.
+**Not verified — needs someone at the kiosk:**
+- The look of the dashboard on the TFT: layout, colours, no flicker, the "Updated N s ago" counter.
+- A **tap** switching screens and a **hold** recording from the dashboard, with the 50 ms debounce on the real button.
+- The full spoken flow from the dashboard: hold, speak, LISTENING, answer, speech.
+- The MQ-135 divider voltage at A1 (measure it), and the soil probe in real soil. Its pegged 16 3xx reading needs investigating before calibration.
